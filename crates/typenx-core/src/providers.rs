@@ -91,7 +91,7 @@ impl AnimeProviderClient for AniListClient {
         code: &str,
         _pkce_verifier: Option<&str>,
     ) -> Result<ProviderIdentity, ProviderError> {
-        let token = self
+        let token_response = self
             .http
             .post(&self.token_url)
             .json(&AniListTokenRequest {
@@ -102,10 +102,9 @@ impl AnimeProviderClient for AniListClient {
                 code,
             })
             .send()
-            .await?
-            .error_for_status()?
-            .json::<OAuthTokenResponse>()
             .await?;
+        let token =
+            decode_json_response::<OAuthTokenResponse>(token_response, "AniList token").await?;
 
         let viewer = self.viewer(&token.access_token).await?;
         Ok(ProviderIdentity {
@@ -168,10 +167,9 @@ impl AniListClient {
             .bearer_auth(access_token)
             .json(&GraphQlRequest { query, variables })
             .send()
-            .await?
-            .error_for_status()?
-            .json::<GraphQlResponse<T>>()
             .await?;
+        let response =
+            decode_json_response::<GraphQlResponse<T>>(response, "AniList GraphQL").await?;
         response.data.ok_or_else(|| {
             ProviderError::InvalidData(
                 response
@@ -245,7 +243,7 @@ impl AnimeProviderClient for MyAnimeListClient {
         code: &str,
         pkce_verifier: Option<&str>,
     ) -> Result<ProviderIdentity, ProviderError> {
-        let token = self
+        let token_response = self
             .http
             .post(&self.token_url)
             .form(&[
@@ -257,10 +255,8 @@ impl AnimeProviderClient for MyAnimeListClient {
                 ("code_verifier", pkce_verifier.unwrap_or("")),
             ])
             .send()
-            .await?
-            .error_for_status()?
-            .json::<OAuthTokenResponse>()
             .await?;
+        let token = decode_json_response::<OAuthTokenResponse>(token_response, "MAL token").await?;
         let profile = self.profile(&token.access_token).await?;
         Ok(ProviderIdentity {
             provider: AuthProvider::MyAnimeList,
@@ -295,15 +291,9 @@ impl AnimeProviderClient for MyAnimeListClient {
             "{}/users/@me/animelist?fields=list_status,num_episodes,title,main_picture&limit=1000",
             self.api_url
         );
-        let response = self
-            .http
-            .get(url)
-            .bearer_auth(&access_token)
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<MalAnimeListResponse>()
-            .await?;
+        let response = self.http.get(url).bearer_auth(&access_token).send().await?;
+        let response =
+            decode_json_response::<MalAnimeListResponse>(response, "MAL anime list").await?;
         let now = Utc::now();
         let entries = response
             .data
@@ -323,7 +313,7 @@ impl MyAnimeListClient {
         &self,
         refresh_token: &str,
     ) -> Result<OAuthTokenResponse, ProviderError> {
-        Ok(self
+        let response = self
             .http
             .post(&self.token_url)
             .form(&[
@@ -333,23 +323,14 @@ impl MyAnimeListClient {
                 ("refresh_token", refresh_token),
             ])
             .send()
-            .await?
-            .error_for_status()?
-            .json::<OAuthTokenResponse>()
-            .await?)
+            .await?;
+        decode_json_response::<OAuthTokenResponse>(response, "MAL refresh token").await
     }
 
     async fn profile(&self, access_token: &str) -> Result<MalProfile, ProviderError> {
         let url = format!("{}/users/@me", self.api_url);
-        Ok(self
-            .http
-            .get(url)
-            .bearer_auth(access_token)
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<MalProfile>()
-            .await?)
+        let response = self.http.get(url).bearer_auth(access_token).send().await?;
+        decode_json_response::<MalProfile>(response, "MAL profile").await
     }
 }
 
@@ -367,6 +348,35 @@ pub enum ProviderError {
     InvalidData(String),
     #[error("http request failed: {0}")]
     Http(#[from] reqwest::Error),
+}
+
+async fn decode_json_response<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+    context: &str,
+) -> Result<T, ProviderError> {
+    let status = response.status();
+    let body = response.text().await?;
+    if !status.is_success() {
+        return Err(ProviderError::Request(format!(
+            "{context} returned HTTP {status}: {}",
+            truncate_body(&body)
+        )));
+    }
+    serde_json::from_str(&body).map_err(|error| {
+        ProviderError::InvalidData(format!(
+            "{context} JSON decode failed: {error}; body: {}",
+            truncate_body(&body)
+        ))
+    })
+}
+
+fn truncate_body(body: &str) -> String {
+    const MAX_LEN: usize = 500;
+    if body.len() <= MAX_LEN {
+        body.to_owned()
+    } else {
+        format!("{}...", &body[..MAX_LEN])
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -411,6 +421,7 @@ struct GraphQlError {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AniListViewerData {
+    #[serde(rename = "Viewer")]
     viewer: AniListViewer,
 }
 
@@ -429,6 +440,7 @@ struct AniListAvatar {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AniListMediaListCollectionData {
+    #[serde(rename = "MediaListCollection")]
     media_list_collection: AniListMediaListCollection,
 }
 

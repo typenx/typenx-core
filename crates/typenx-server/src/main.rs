@@ -5,6 +5,8 @@ use typenx_storage::{SqlStore, TypenxStore};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    dotenvy::dotenv().ok();
+
     let database_url = env::var("TYPENX_DATABASE_URL")
         .unwrap_or_else(|_| "sqlite://typenx.sqlite?mode=rwc".to_owned());
     let bind_addr: SocketAddr = env::var("TYPENX_BIND_ADDR")

@@ -19,6 +19,7 @@ metadata, catalogs, search results, and episode metadata only.
 ## Quick start
 
 ```powershell
-$env:TYPENX_DATABASE_URL = "sqlite://typenx.sqlite?mode=rwc"
 cargo run -p typenx-server
 ```
+
+For local configuration, copy `.env.example` to `.env` and fill in the OAuth credentials.
