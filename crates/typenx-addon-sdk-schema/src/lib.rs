@@ -8,6 +8,7 @@ pub struct AddonManifest {
     pub name: String,
     pub version: String,
     pub description: Option<String>,
+    pub icon: Option<String>,
     pub resources: Vec<AddonResource>,
     pub catalogs: Vec<CatalogDefinition>,
 }
@@ -117,6 +118,7 @@ mod tests {
             name: "Demo".to_owned(),
             version: "0.1.0".to_owned(),
             description: None,
+            icon: Some("https://example.com/icon.png".to_owned()),
             resources: vec![AddonResource::Catalog, AddonResource::Search],
             catalogs: vec![CatalogDefinition {
                 id: "popular".to_owned(),

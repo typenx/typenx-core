@@ -9,11 +9,20 @@ use crate::addon_schema::{
     AddonHealth, AddonManifest, AnimeMetadata, CatalogRequest, CatalogResponse, SearchRequest,
 };
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AddonSource {
+    BuiltIn,
+    User,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
 pub struct AddonRegistration {
     pub id: Uuid,
     pub base_url: String,
     pub enabled: bool,
+    pub source: AddonSource,
+    pub deletable: bool,
     pub manifest: Option<AddonManifest>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,

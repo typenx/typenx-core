@@ -59,6 +59,7 @@ pub trait TypenxStore: Send + Sync {
         &self,
         addon: AddonRegistration,
     ) -> Result<AddonRegistration, StorageError>;
+    async fn delete_addon(&self, addon_id: Uuid) -> Result<(), StorageError>;
     async fn list_addons(&self) -> Result<Vec<AddonRegistration>, StorageError>;
     async fn get_metadata_cache(
         &self,

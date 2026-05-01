@@ -4,7 +4,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{header, HeaderMap, HeaderValue, Method, StatusCode},
     response::{IntoResponse, Json, Redirect, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 use chrono::{Duration, Utc};
@@ -17,7 +17,9 @@ use typenx_addon_sdk_schema::{
     AddonManifest, AnimeMetadata, CatalogRequest, CatalogResponse, SearchRequest,
 };
 use typenx_core::{
-    addons::{AddonRegistration, MetadataCacheEntry, RegisterAddonRequest, RemoteAddonClient},
+    addons::{
+        AddonRegistration, AddonSource, MetadataCacheEntry, RegisterAddonRequest, RemoteAddonClient,
+    },
     auth::{AuthProvider, CurrentUser, LinkedProvider, LoginResult, OAuthState, Session, User},
     providers::{
         new_mal_pkce_verifier, AniListClient, AnimeProviderClient, MyAnimeListClient,
@@ -37,6 +39,7 @@ pub struct AppConfig {
     pub web_redirect_url: String,
     pub session_secret: String,
     pub secure_cookies: bool,
+    pub built_in_addons: Vec<String>,
 }
 
 impl AppConfig {
@@ -50,6 +53,16 @@ impl AppConfig {
                 .unwrap_or_else(|_| "http://127.0.0.1:3000".to_owned()),
             session_secret: env::var("TYPENX_SESSION_SECRET")
                 .unwrap_or_else(|_| "typenx-dev-session-secret-change-me".to_owned()),
+            built_in_addons: env::var("TYPENX_BUILTIN_ADDONS")
+                .map(|value| {
+                    value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 
@@ -137,6 +150,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/me/library", get(me_library))
         .route("/me/progress", get(me_progress))
         .route("/addons", get(list_addons).post(register_addon))
+        .route("/addons/{id}", delete(delete_addon))
         .route("/addons/{id}/manifest", get(addon_manifest))
         .route("/catalogs", post(catalogs))
         .route("/search", post(search))
@@ -162,7 +176,7 @@ fn cors_layer(config: &AppConfig) -> CorsLayer {
                 .is_ok_and(|origin| allowed_origins.iter().any(|allowed| allowed == origin))
         }))
         .allow_credentials(true)
-        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
         .allow_headers([header::ACCEPT, header::CONTENT_TYPE])
 }
 
@@ -194,6 +208,7 @@ fn origin_from_url(url: &str) -> Option<String> {
         me_progress,
         list_addons,
         register_addon,
+        delete_addon,
         addon_manifest,
         catalogs,
         search,
@@ -212,6 +227,7 @@ fn origin_from_url(url: &str) -> Option<String> {
         Session,
         RegisterAddonRequest,
         AddonRegistration,
+        AddonSource,
         AddonManifest,
         CatalogRequest,
         SearchRequest,
@@ -387,7 +403,7 @@ async fn me_progress(
 async fn list_addons(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<AddonRegistration>>, ApiFailure> {
-    Ok(Json(state.store.list_addons().await?))
+    Ok(Json(list_all_addons(&state).await?))
 }
 
 #[utoipa::path(
@@ -406,11 +422,38 @@ async fn register_addon(
         id: Uuid::new_v4(),
         base_url: request.base_url,
         enabled: true,
+        source: AddonSource::User,
+        deletable: true,
         manifest: Some(manifest),
         created_at: now,
         updated_at: now,
     };
     Ok(Json(state.store.register_addon(addon).await?))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/addons/{id}",
+    params(("id" = Uuid, Path, description = "Addon id")),
+    responses((status = 204), (status = 403, body = ApiError), (status = 404, body = ApiError))
+)]
+async fn delete_addon(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Response, ApiFailure> {
+    if state
+        .config
+        .built_in_addons
+        .iter()
+        .any(|base_url| built_in_addon_id(base_url) == id)
+    {
+        return Err(ApiFailure {
+            status: StatusCode::FORBIDDEN,
+            message: "built-in addons cannot be deleted".to_owned(),
+        });
+    }
+    state.store.delete_addon(id).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 #[utoipa::path(
@@ -423,9 +466,7 @@ async fn addon_manifest(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<AddonManifest>, ApiFailure> {
-    let addon = state
-        .store
-        .list_addons()
+    let addon = list_all_addons(&state)
         .await?
         .into_iter()
         .find(|addon| addon.id == id)
@@ -702,13 +743,37 @@ fn expired_session_cookie(config: &AppConfig) -> String {
 }
 
 async fn first_enabled_addon(state: &AppState) -> Result<AddonRegistration, ApiFailure> {
-    state
-        .store
-        .list_addons()
+    list_all_addons(state)
         .await?
         .into_iter()
         .find(|addon| addon.enabled)
         .ok_or_else(|| ApiFailure::not_found("no enabled addon registered"))
+}
+
+async fn list_all_addons(state: &AppState) -> Result<Vec<AddonRegistration>, ApiFailure> {
+    let mut addons = state.store.list_addons().await?;
+    for base_url in &state.config.built_in_addons {
+        let now = Utc::now();
+        let manifest = state.addon_client.manifest(base_url).await.ok();
+        addons.push(AddonRegistration {
+            id: built_in_addon_id(base_url),
+            base_url: base_url.to_owned(),
+            enabled: true,
+            source: AddonSource::BuiltIn,
+            deletable: false,
+            manifest,
+            created_at: now,
+            updated_at: now,
+        });
+    }
+    Ok(addons)
+}
+
+fn built_in_addon_id(base_url: &str) -> Uuid {
+    let digest = hash_token("typenx-built-in-addon", base_url);
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest.as_bytes()[..16]);
+    Uuid::from_bytes(bytes)
 }
 
 async fn read_cache<T: serde::de::DeserializeOwned>(
@@ -952,6 +1017,7 @@ mod tests {
                 web_redirect_url: "http://127.0.0.1:3000".to_owned(),
                 session_secret: "test-secret".to_owned(),
                 secure_cookies: false,
+                built_in_addons: vec![],
             },
         )
     }

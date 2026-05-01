@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::{any::AnyPoolOptions, AnyPool, Row};
 use typenx_core::{
-    addons::{AddonRegistration, MetadataCacheEntry},
+    addons::{AddonRegistration, AddonSource, MetadataCacheEntry},
     auth::{AuthProvider, LinkedProvider, OAuthState, Session, User},
     library::{AnimeListEntry, WatchProgress, WatchStatus},
 };
@@ -66,6 +66,9 @@ impl TypenxStore for SqlStore {
     async fn migrate(&self) -> Result<(), StorageError> {
         for statement in MIGRATIONS {
             sqlx::query(statement).execute(&self.pool).await?;
+        }
+        for statement in OPTIONAL_MIGRATIONS {
+            let _ = sqlx::query(statement).execute(&self.pool).await;
         }
         Ok(())
     }
@@ -342,16 +345,20 @@ impl TypenxStore for SqlStore {
             .map(serde_json::to_string)
             .transpose()?;
         sqlx::query(
-            "INSERT INTO addons (id, base_url, enabled, manifest_json, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?)
+            "INSERT INTO addons (id, base_url, enabled, source, deletable, manifest_json, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(base_url) DO UPDATE SET
                 enabled = excluded.enabled,
+                source = excluded.source,
+                deletable = excluded.deletable,
                 manifest_json = excluded.manifest_json,
                 updated_at = excluded.updated_at",
         )
         .bind(addon.id.to_string())
         .bind(&addon.base_url)
         .bind(addon.enabled)
+        .bind(addon_source_to_str(addon.source))
+        .bind(addon.deletable)
         .bind(manifest_json)
         .bind(addon.created_at.to_rfc3339())
         .bind(addon.updated_at.to_rfc3339())
@@ -370,10 +377,12 @@ impl TypenxStore for SqlStore {
             .map(serde_json::to_string)
             .transpose()?;
         sqlx::query(
-            "UPDATE addons SET base_url = ?, enabled = ?, manifest_json = ?, updated_at = ? WHERE id = ?",
+            "UPDATE addons SET base_url = ?, enabled = ?, source = ?, deletable = ?, manifest_json = ?, updated_at = ? WHERE id = ?",
         )
         .bind(&addon.base_url)
         .bind(addon.enabled)
+        .bind(addon_source_to_str(addon.source))
+        .bind(addon.deletable)
         .bind(manifest_json)
         .bind(addon.updated_at.to_rfc3339())
         .bind(addon.id.to_string())
@@ -382,9 +391,17 @@ impl TypenxStore for SqlStore {
         Ok(addon)
     }
 
+    async fn delete_addon(&self, addon_id: Uuid) -> Result<(), StorageError> {
+        sqlx::query("DELETE FROM addons WHERE id = ?")
+            .bind(addon_id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     async fn list_addons(&self) -> Result<Vec<AddonRegistration>, StorageError> {
         let rows = sqlx::query(
-            "SELECT id, base_url, enabled, manifest_json, created_at, updated_at FROM addons",
+            "SELECT id, base_url, enabled, source, deletable, manifest_json, created_at, updated_at FROM addons",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -503,6 +520,8 @@ const MIGRATIONS: &[&str] = &[
         id TEXT PRIMARY KEY,
         base_url TEXT NOT NULL,
         enabled BOOLEAN NOT NULL,
+        source TEXT NOT NULL DEFAULT 'user',
+        deletable BOOLEAN NOT NULL DEFAULT TRUE,
         manifest_json TEXT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
@@ -520,6 +539,11 @@ const MIGRATIONS: &[&str] = &[
     )",
     "CREATE UNIQUE INDEX IF NOT EXISTS metadata_cache_identity_idx
         ON metadata_cache (addon_id, cache_key)",
+];
+
+const OPTIONAL_MIGRATIONS: &[&str] = &[
+    "ALTER TABLE addons ADD COLUMN source TEXT NOT NULL DEFAULT 'user'",
+    "ALTER TABLE addons ADD COLUMN deletable BOOLEAN NOT NULL DEFAULT TRUE",
 ];
 
 fn row_to_user(row: sqlx::any::AnyRow) -> Result<User, StorageError> {
@@ -610,6 +634,8 @@ fn row_to_addon(row: sqlx::any::AnyRow) -> Result<AddonRegistration, StorageErro
         id: parse_uuid(row.try_get::<String, _>("id")?)?,
         base_url: row.try_get("base_url")?,
         enabled: row.try_get("enabled")?,
+        source: parse_addon_source(&row.try_get::<String, _>("source")?),
+        deletable: row.try_get("deletable")?,
         manifest: manifest_json
             .map(|json| serde_json::from_str(&json))
             .transpose()?,
@@ -647,6 +673,20 @@ fn parse_provider(value: &str) -> AuthProvider {
     match value {
         "my_anime_list" => AuthProvider::MyAnimeList,
         _ => AuthProvider::AniList,
+    }
+}
+
+fn addon_source_to_str(source: AddonSource) -> &'static str {
+    match source {
+        AddonSource::BuiltIn => "built_in",
+        AddonSource::User => "user",
+    }
+}
+
+fn parse_addon_source(value: &str) -> AddonSource {
+    match value {
+        "built_in" => AddonSource::BuiltIn,
+        _ => AddonSource::User,
     }
 }
 

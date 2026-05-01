@@ -277,6 +277,15 @@ impl TypenxStore for MemoryStore {
         Ok(addon)
     }
 
+    async fn delete_addon(&self, addon_id: Uuid) -> Result<(), StorageError> {
+        self.inner
+            .write()
+            .map_err(|_| StorageError::LockPoisoned)?
+            .addons
+            .remove(&addon_id);
+        Ok(())
+    }
+
     async fn list_addons(&self) -> Result<Vec<AddonRegistration>, StorageError> {
         Ok(self
             .inner
