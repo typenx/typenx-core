@@ -51,8 +51,9 @@ impl AppConfig {
             public_base_url,
             web_redirect_url: env::var("TYPENX_WEB_REDIRECT_URL")
                 .unwrap_or_else(|_| "http://127.0.0.1:3000".to_owned()),
-            session_secret: env::var("TYPENX_SESSION_SECRET")
-                .unwrap_or_else(|_| "typenx-dev-session-secret-change-me".to_owned()),
+            session_secret: env::var("TYPENX_SESSION_SECRET").expect(
+                "TYPENX_SESSION_SECRET is required; set a long random secret in the environment",
+            ),
             built_in_addons: env::var("TYPENX_BUILTIN_ADDONS")
                 .map(|value| {
                     value
@@ -919,7 +920,7 @@ mod tests {
 
     #[tokio::test]
     async fn login_callback_sets_cookie_and_me_reads_session() {
-        let state = test_state().with_provider(Arc::new(FakeProvider));
+        let state = test_state().with_provider(Arc::new(TestAnimeProvider));
         let router = build_router(state);
 
         let login_response = router
@@ -1022,10 +1023,10 @@ mod tests {
         )
     }
 
-    struct FakeProvider;
+    struct TestAnimeProvider;
 
     #[async_trait]
-    impl AnimeProviderClient for FakeProvider {
+    impl AnimeProviderClient for TestAnimeProvider {
         fn provider(&self) -> AuthProvider {
             AuthProvider::AniList
         }

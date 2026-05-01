@@ -114,11 +114,11 @@ mod tests {
     #[test]
     fn addon_manifest_serializes_protocol_shape() {
         let manifest = AddonManifest {
-            id: "demo".to_owned(),
-            name: "Demo".to_owned(),
+            id: "schema-test-addon".to_owned(),
+            name: "Schema Test Addon".to_owned(),
             version: "0.1.0".to_owned(),
             description: None,
-            icon: Some("https://example.com/icon.png".to_owned()),
+            icon: Some("https://typenx.dev/addon-icon.png".to_owned()),
             resources: vec![AddonResource::Catalog, AddonResource::Search],
             catalogs: vec![CatalogDefinition {
                 id: "popular".to_owned(),
