@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use sqlx::{any::AnyPoolOptions, AnyPool, Row};
 use typenx_core::{
-    addons::AddonRegistration,
-    auth::{AuthProvider, LinkedProvider, Session, User},
+    addons::{AddonRegistration, MetadataCacheEntry},
+    auth::{AuthProvider, LinkedProvider, OAuthState, Session, User},
     library::{AnimeListEntry, WatchProgress, WatchStatus},
 };
 use uuid::Uuid;
@@ -73,7 +73,11 @@ impl TypenxStore for SqlStore {
     async fn upsert_user(&self, user: User) -> Result<User, StorageError> {
         sqlx::query(
             "INSERT INTO users (id, display_name, avatar_url, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO UPDATE SET
+                display_name = excluded.display_name,
+                avatar_url = excluded.avatar_url,
+                updated_at = excluded.updated_at",
         )
         .bind(user.id.to_string())
         .bind(&user.display_name)
@@ -103,7 +107,13 @@ impl TypenxStore for SqlStore {
             "INSERT INTO linked_providers
              (id, user_id, provider, provider_user_id, provider_username, access_token,
               refresh_token, expires_at, linked_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(provider, provider_user_id) DO UPDATE SET
+                user_id = excluded.user_id,
+                provider_username = excluded.provider_username,
+                access_token = excluded.access_token,
+                refresh_token = excluded.refresh_token,
+                expires_at = excluded.expires_at",
         )
         .bind(linked_provider.id.to_string())
         .bind(linked_provider.user_id.to_string())
@@ -151,6 +161,91 @@ impl TypenxStore for SqlStore {
         Ok(session)
     }
 
+    async fn get_session_by_token_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<Session>, StorageError> {
+        let row = sqlx::query(
+            "SELECT id, user_id, token_hash, created_at, expires_at, revoked_at
+             FROM sessions WHERE token_hash = ?",
+        )
+        .bind(token_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_session).transpose()
+    }
+
+    async fn revoke_session(&self, session_id: Uuid) -> Result<(), StorageError> {
+        sqlx::query("UPDATE sessions SET revoked_at = ? WHERE id = ?")
+            .bind(Utc::now().to_rfc3339())
+            .bind(session_id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn create_oauth_state(&self, state: OAuthState) -> Result<OAuthState, StorageError> {
+        sqlx::query(
+            "INSERT INTO oauth_states
+             (state, provider, redirect_after, pkce_verifier, created_at, expires_at, consumed_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&state.state)
+        .bind(state.provider.as_str())
+        .bind(&state.redirect_after)
+        .bind(&state.pkce_verifier)
+        .bind(state.created_at.to_rfc3339())
+        .bind(state.expires_at.to_rfc3339())
+        .bind(state.consumed_at.map(|date| date.to_rfc3339()))
+        .execute(&self.pool)
+        .await?;
+        Ok(state)
+    }
+
+    async fn consume_oauth_state(
+        &self,
+        state: &str,
+        provider: AuthProvider,
+    ) -> Result<Option<OAuthState>, StorageError> {
+        let row = sqlx::query(
+            "SELECT state, provider, redirect_after, pkce_verifier, created_at, expires_at, consumed_at
+             FROM oauth_states WHERE state = ? AND provider = ?",
+        )
+        .bind(state)
+        .bind(provider.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(oauth_state) = row.map(row_to_oauth_state).transpose()? else {
+            return Ok(None);
+        };
+        if oauth_state.consumed_at.is_some() {
+            return Ok(None);
+        }
+        sqlx::query("UPDATE oauth_states SET consumed_at = ? WHERE state = ?")
+            .bind(Utc::now().to_rfc3339())
+            .bind(state)
+            .execute(&self.pool)
+            .await?;
+        Ok(Some(oauth_state))
+    }
+
+    async fn find_linked_provider(
+        &self,
+        provider: AuthProvider,
+        provider_user_id: &str,
+    ) -> Result<Option<LinkedProvider>, StorageError> {
+        let row = sqlx::query(
+            "SELECT id, user_id, provider, provider_user_id, provider_username, access_token,
+                    refresh_token, expires_at, linked_at
+             FROM linked_providers WHERE provider = ? AND provider_user_id = ?",
+        )
+        .bind(provider.as_str())
+        .bind(provider_user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_linked_provider).transpose()
+    }
+
     async fn list_library(&self, user_id: Uuid) -> Result<Vec<AnimeListEntry>, StorageError> {
         let rows = sqlx::query(
             "SELECT id, user_id, provider, provider_anime_id, title, status, score,
@@ -171,7 +266,14 @@ impl TypenxStore for SqlStore {
             "INSERT INTO anime_list_entries
              (id, user_id, provider, provider_anime_id, title, status, score, progress_episodes,
               total_episodes, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(user_id, provider, provider_anime_id) DO UPDATE SET
+                title = excluded.title,
+                status = excluded.status,
+                score = excluded.score,
+                progress_episodes = excluded.progress_episodes,
+                total_episodes = excluded.total_episodes,
+                updated_at = excluded.updated_at",
         )
         .bind(entry.id.to_string())
         .bind(entry.user_id.to_string())
@@ -196,7 +298,13 @@ impl TypenxStore for SqlStore {
             "INSERT INTO watch_progress
              (id, user_id, anime_id, episode_id, episode_number, position_seconds,
               duration_seconds, completed, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(user_id, anime_id, episode_id) DO UPDATE SET
+                episode_number = excluded.episode_number,
+                position_seconds = excluded.position_seconds,
+                duration_seconds = excluded.duration_seconds,
+                completed = excluded.completed,
+                updated_at = excluded.updated_at",
         )
         .bind(progress.id.to_string())
         .bind(progress.user_id.to_string())
@@ -235,7 +343,11 @@ impl TypenxStore for SqlStore {
             .transpose()?;
         sqlx::query(
             "INSERT INTO addons (id, base_url, enabled, manifest_json, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(base_url) DO UPDATE SET
+                enabled = excluded.enabled,
+                manifest_json = excluded.manifest_json,
+                updated_at = excluded.updated_at",
         )
         .bind(addon.id.to_string())
         .bind(&addon.base_url)
@@ -248,6 +360,28 @@ impl TypenxStore for SqlStore {
         Ok(addon)
     }
 
+    async fn update_addon(
+        &self,
+        addon: AddonRegistration,
+    ) -> Result<AddonRegistration, StorageError> {
+        let manifest_json = addon
+            .manifest
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+        sqlx::query(
+            "UPDATE addons SET base_url = ?, enabled = ?, manifest_json = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(&addon.base_url)
+        .bind(addon.enabled)
+        .bind(manifest_json)
+        .bind(addon.updated_at.to_rfc3339())
+        .bind(addon.id.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(addon)
+    }
+
     async fn list_addons(&self) -> Result<Vec<AddonRegistration>, StorageError> {
         let rows = sqlx::query(
             "SELECT id, base_url, enabled, manifest_json, created_at, updated_at FROM addons",
@@ -255,6 +389,44 @@ impl TypenxStore for SqlStore {
         .fetch_all(&self.pool)
         .await?;
         rows.into_iter().map(row_to_addon).collect()
+    }
+
+    async fn get_metadata_cache(
+        &self,
+        addon_id: Uuid,
+        cache_key: &str,
+    ) -> Result<Option<MetadataCacheEntry>, StorageError> {
+        let row = sqlx::query(
+            "SELECT id, addon_id, cache_key, payload_json, expires_at, created_at
+             FROM metadata_cache WHERE addon_id = ? AND cache_key = ?",
+        )
+        .bind(addon_id.to_string())
+        .bind(cache_key)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_metadata_cache).transpose()
+    }
+
+    async fn set_metadata_cache(
+        &self,
+        entry: MetadataCacheEntry,
+    ) -> Result<MetadataCacheEntry, StorageError> {
+        sqlx::query(
+            "INSERT INTO metadata_cache (id, addon_id, cache_key, payload_json, expires_at, created_at)
+             VALUES (?, ?, ?, ?, ?, ?)
+             ON CONFLICT(addon_id, cache_key) DO UPDATE SET
+                payload_json = excluded.payload_json,
+                expires_at = excluded.expires_at",
+        )
+        .bind(entry.id.to_string())
+        .bind(entry.addon_id.to_string())
+        .bind(&entry.cache_key)
+        .bind(&entry.payload_json)
+        .bind(entry.expires_at.to_rfc3339())
+        .bind(entry.created_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(entry)
     }
 }
 
@@ -275,8 +447,11 @@ const MIGRATIONS: &[&str] = &[
         access_token TEXT NOT NULL,
         refresh_token TEXT NULL,
         expires_at TEXT NULL,
-        linked_at TEXT NOT NULL
+        linked_at TEXT NOT NULL,
+        UNIQUE(provider, provider_user_id)
     )",
+    "CREATE UNIQUE INDEX IF NOT EXISTS linked_providers_identity_idx
+        ON linked_providers (provider, provider_user_id)",
     "CREATE TABLE IF NOT EXISTS sessions (
         id TEXT PRIMARY KEY,
         user_id TEXT NOT NULL,
@@ -284,6 +459,16 @@ const MIGRATIONS: &[&str] = &[
         created_at TEXT NOT NULL,
         expires_at TEXT NOT NULL,
         revoked_at TEXT NULL
+    )",
+    "CREATE INDEX IF NOT EXISTS sessions_token_hash_idx ON sessions (token_hash)",
+    "CREATE TABLE IF NOT EXISTS oauth_states (
+        state TEXT PRIMARY KEY,
+        provider TEXT NOT NULL,
+        redirect_after TEXT NULL,
+        pkce_verifier TEXT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        consumed_at TEXT NULL
     )",
     "CREATE TABLE IF NOT EXISTS anime_list_entries (
         id TEXT PRIMARY KEY,
@@ -295,8 +480,11 @@ const MIGRATIONS: &[&str] = &[
         score REAL NULL,
         progress_episodes INTEGER NOT NULL,
         total_episodes INTEGER NULL,
-        updated_at TEXT NOT NULL
+        updated_at TEXT NOT NULL,
+        UNIQUE(user_id, provider, provider_anime_id)
     )",
+    "CREATE UNIQUE INDEX IF NOT EXISTS anime_list_identity_idx
+        ON anime_list_entries (user_id, provider, provider_anime_id)",
     "CREATE TABLE IF NOT EXISTS watch_progress (
         id TEXT PRIMARY KEY,
         user_id TEXT NOT NULL,
@@ -306,16 +494,32 @@ const MIGRATIONS: &[&str] = &[
         position_seconds INTEGER NOT NULL,
         duration_seconds INTEGER NULL,
         completed BOOLEAN NOT NULL,
-        updated_at TEXT NOT NULL
+        updated_at TEXT NOT NULL,
+        UNIQUE(user_id, anime_id, episode_id)
     )",
+    "CREATE UNIQUE INDEX IF NOT EXISTS watch_progress_identity_idx
+        ON watch_progress (user_id, anime_id, episode_id)",
     "CREATE TABLE IF NOT EXISTS addons (
         id TEXT PRIMARY KEY,
         base_url TEXT NOT NULL,
         enabled BOOLEAN NOT NULL,
         manifest_json TEXT NULL,
         created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
+        updated_at TEXT NOT NULL,
+        UNIQUE(base_url)
     )",
+    "CREATE UNIQUE INDEX IF NOT EXISTS addons_base_url_idx ON addons (base_url)",
+    "CREATE TABLE IF NOT EXISTS metadata_cache (
+        id TEXT PRIMARY KEY,
+        addon_id TEXT NOT NULL,
+        cache_key TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        UNIQUE(addon_id, cache_key)
+    )",
+    "CREATE UNIQUE INDEX IF NOT EXISTS metadata_cache_identity_idx
+        ON metadata_cache (addon_id, cache_key)",
 ];
 
 fn row_to_user(row: sqlx::any::AnyRow) -> Result<User, StorageError> {
@@ -325,6 +529,29 @@ fn row_to_user(row: sqlx::any::AnyRow) -> Result<User, StorageError> {
         avatar_url: row.try_get("avatar_url")?,
         created_at: parse_datetime(row.try_get::<String, _>("created_at")?)?,
         updated_at: parse_datetime(row.try_get::<String, _>("updated_at")?)?,
+    })
+}
+
+fn row_to_session(row: sqlx::any::AnyRow) -> Result<Session, StorageError> {
+    Ok(Session {
+        id: parse_uuid(row.try_get::<String, _>("id")?)?,
+        user_id: parse_uuid(row.try_get::<String, _>("user_id")?)?,
+        token_hash: row.try_get("token_hash")?,
+        created_at: parse_datetime(row.try_get::<String, _>("created_at")?)?,
+        expires_at: parse_datetime(row.try_get::<String, _>("expires_at")?)?,
+        revoked_at: parse_optional_datetime(row.try_get("revoked_at")?)?,
+    })
+}
+
+fn row_to_oauth_state(row: sqlx::any::AnyRow) -> Result<OAuthState, StorageError> {
+    Ok(OAuthState {
+        state: row.try_get("state")?,
+        provider: parse_provider(&row.try_get::<String, _>("provider")?),
+        redirect_after: row.try_get("redirect_after")?,
+        pkce_verifier: row.try_get("pkce_verifier")?,
+        created_at: parse_datetime(row.try_get::<String, _>("created_at")?)?,
+        expires_at: parse_datetime(row.try_get::<String, _>("expires_at")?)?,
+        consumed_at: parse_optional_datetime(row.try_get("consumed_at")?)?,
     })
 }
 
@@ -388,6 +615,17 @@ fn row_to_addon(row: sqlx::any::AnyRow) -> Result<AddonRegistration, StorageErro
             .transpose()?,
         created_at: parse_datetime(row.try_get::<String, _>("created_at")?)?,
         updated_at: parse_datetime(row.try_get::<String, _>("updated_at")?)?,
+    })
+}
+
+fn row_to_metadata_cache(row: sqlx::any::AnyRow) -> Result<MetadataCacheEntry, StorageError> {
+    Ok(MetadataCacheEntry {
+        id: parse_uuid(row.try_get::<String, _>("id")?)?,
+        addon_id: parse_uuid(row.try_get::<String, _>("addon_id")?)?,
+        cache_key: row.try_get("cache_key")?,
+        payload_json: row.try_get("payload_json")?,
+        expires_at: parse_datetime(row.try_get::<String, _>("expires_at")?)?,
+        created_at: parse_datetime(row.try_get::<String, _>("created_at")?)?,
     })
 }
 

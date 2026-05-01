@@ -5,8 +5,8 @@ use std::{
 
 use async_trait::async_trait;
 use typenx_core::{
-    addons::AddonRegistration,
-    auth::{LinkedProvider, Session, User},
+    addons::{AddonRegistration, MetadataCacheEntry},
+    auth::{AuthProvider, LinkedProvider, OAuthState, Session, User},
     library::{AnimeListEntry, WatchProgress},
 };
 use uuid::Uuid;
@@ -68,9 +68,11 @@ struct MemoryState {
     users: HashMap<Uuid, User>,
     linked_providers: HashMap<Uuid, LinkedProvider>,
     sessions: HashMap<Uuid, Session>,
+    oauth_states: HashMap<String, OAuthState>,
     library: HashMap<Uuid, AnimeListEntry>,
     progress: HashMap<Uuid, WatchProgress>,
     addons: HashMap<Uuid, AddonRegistration>,
+    metadata_cache: HashMap<(Uuid, String), MetadataCacheEntry>,
 }
 
 #[async_trait]
@@ -134,6 +136,75 @@ impl TypenxStore for MemoryStore {
         Ok(session)
     }
 
+    async fn get_session_by_token_hash(
+        &self,
+        token_hash: &str,
+    ) -> Result<Option<Session>, StorageError> {
+        Ok(self
+            .inner
+            .read()
+            .map_err(|_| StorageError::LockPoisoned)?
+            .sessions
+            .values()
+            .find(|session| session.token_hash == token_hash)
+            .cloned())
+    }
+
+    async fn revoke_session(&self, session_id: Uuid) -> Result<(), StorageError> {
+        if let Some(session) = self
+            .inner
+            .write()
+            .map_err(|_| StorageError::LockPoisoned)?
+            .sessions
+            .get_mut(&session_id)
+        {
+            session.revoked_at = Some(chrono::Utc::now());
+        }
+        Ok(())
+    }
+
+    async fn create_oauth_state(&self, state: OAuthState) -> Result<OAuthState, StorageError> {
+        self.inner
+            .write()
+            .map_err(|_| StorageError::LockPoisoned)?
+            .oauth_states
+            .insert(state.state.clone(), state.clone());
+        Ok(state)
+    }
+
+    async fn consume_oauth_state(
+        &self,
+        state: &str,
+        provider: AuthProvider,
+    ) -> Result<Option<OAuthState>, StorageError> {
+        let mut guard = self.inner.write().map_err(|_| StorageError::LockPoisoned)?;
+        let Some(existing) = guard.oauth_states.get_mut(state) else {
+            return Ok(None);
+        };
+        if existing.provider != provider || existing.consumed_at.is_some() {
+            return Ok(None);
+        }
+        existing.consumed_at = Some(chrono::Utc::now());
+        Ok(Some(existing.clone()))
+    }
+
+    async fn find_linked_provider(
+        &self,
+        provider: AuthProvider,
+        provider_user_id: &str,
+    ) -> Result<Option<LinkedProvider>, StorageError> {
+        Ok(self
+            .inner
+            .read()
+            .map_err(|_| StorageError::LockPoisoned)?
+            .linked_providers
+            .values()
+            .find(|linked| {
+                linked.provider == provider && linked.provider_user_id == provider_user_id
+            })
+            .cloned())
+    }
+
     async fn list_library(&self, user_id: Uuid) -> Result<Vec<AnimeListEntry>, StorageError> {
         Ok(self
             .inner
@@ -194,6 +265,18 @@ impl TypenxStore for MemoryStore {
         Ok(addon)
     }
 
+    async fn update_addon(
+        &self,
+        addon: AddonRegistration,
+    ) -> Result<AddonRegistration, StorageError> {
+        self.inner
+            .write()
+            .map_err(|_| StorageError::LockPoisoned)?
+            .addons
+            .insert(addon.id, addon.clone());
+        Ok(addon)
+    }
+
     async fn list_addons(&self) -> Result<Vec<AddonRegistration>, StorageError> {
         Ok(self
             .inner
@@ -203,5 +286,31 @@ impl TypenxStore for MemoryStore {
             .values()
             .cloned()
             .collect())
+    }
+
+    async fn get_metadata_cache(
+        &self,
+        addon_id: Uuid,
+        cache_key: &str,
+    ) -> Result<Option<MetadataCacheEntry>, StorageError> {
+        Ok(self
+            .inner
+            .read()
+            .map_err(|_| StorageError::LockPoisoned)?
+            .metadata_cache
+            .get(&(addon_id, cache_key.to_owned()))
+            .cloned())
+    }
+
+    async fn set_metadata_cache(
+        &self,
+        entry: MetadataCacheEntry,
+    ) -> Result<MetadataCacheEntry, StorageError> {
+        self.inner
+            .write()
+            .map_err(|_| StorageError::LockPoisoned)?
+            .metadata_cache
+            .insert((entry.addon_id, entry.cache_key.clone()), entry.clone());
+        Ok(entry)
     }
 }

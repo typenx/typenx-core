@@ -42,6 +42,17 @@ pub struct LinkedProvider {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+pub struct OAuthState {
+    pub state: String,
+    pub provider: AuthProvider,
+    pub redirect_after: Option<String>,
+    pub pkce_verifier: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub consumed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
 pub struct Session {
     pub id: Uuid,
     pub user_id: Uuid,
@@ -68,4 +79,10 @@ pub struct LoginResult {
     pub linked_provider: LinkedProvider,
     pub session: Session,
     pub session_token: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+pub struct CurrentUser {
+    pub user: User,
+    pub providers: Vec<LinkedProvider>,
 }

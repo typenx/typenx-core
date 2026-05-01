@@ -1,9 +1,9 @@
-use std::sync::Arc;
+use std::{collections::HashMap, env, sync::Arc};
 
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
-    response::{IntoResponse, Json},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
+    response::{IntoResponse, Json, Redirect, Response},
     routing::{get, post},
     Router,
 };
@@ -14,25 +14,106 @@ use typenx_addon_sdk_schema::{
     AddonManifest, AnimeMetadata, CatalogRequest, CatalogResponse, SearchRequest,
 };
 use typenx_core::{
-    addons::{AddonRegistration, RegisterAddonRequest, RemoteAddonClient},
-    auth::{AuthProvider, LinkedProvider, LoginResult, ProviderIdentity, Session, User},
+    addons::{AddonRegistration, MetadataCacheEntry, RegisterAddonRequest, RemoteAddonClient},
+    auth::{AuthProvider, CurrentUser, LinkedProvider, LoginResult, OAuthState, Session, User},
+    providers::{
+        new_mal_pkce_verifier, AniListClient, AnimeProviderClient, MyAnimeListClient,
+        OAuthProviderConfig,
+    },
+    security::{hash_token, protect_token, random_url_token},
 };
 use typenx_storage::TypenxStore;
 use utoipa::{IntoParams, OpenApi, ToSchema};
 use uuid::Uuid;
 
+const SESSION_COOKIE: &str = "typenx_session";
+
+#[derive(Clone)]
+pub struct AppConfig {
+    pub public_base_url: String,
+    pub web_redirect_url: String,
+    pub session_secret: String,
+    pub secure_cookies: bool,
+}
+
+impl AppConfig {
+    pub fn from_env() -> Self {
+        let public_base_url = env::var("TYPENX_PUBLIC_BASE_URL")
+            .unwrap_or_else(|_| "http://127.0.0.1:8080".to_owned());
+        Self {
+            secure_cookies: public_base_url.starts_with("https://"),
+            public_base_url,
+            web_redirect_url: env::var("TYPENX_WEB_REDIRECT_URL")
+                .unwrap_or_else(|_| "http://127.0.0.1:3000".to_owned()),
+            session_secret: env::var("TYPENX_SESSION_SECRET")
+                .unwrap_or_else(|_| "typenx-dev-session-secret-change-me".to_owned()),
+        }
+    }
+
+    fn callback_url(&self, provider: AuthProvider) -> String {
+        let provider_path = match provider {
+            AuthProvider::AniList => "anilist",
+            AuthProvider::MyAnimeList => "mal",
+        };
+        format!(
+            "{}/auth/{provider_path}/callback",
+            self.public_base_url.trim_end_matches('/')
+        )
+    }
+}
+
 #[derive(Clone)]
 pub struct AppState {
     store: Arc<dyn TypenxStore>,
     addon_client: RemoteAddonClient,
+    config: AppConfig,
+    providers: HashMap<AuthProvider, Arc<dyn AnimeProviderClient>>,
 }
 
 impl AppState {
     pub fn new(store: Arc<dyn TypenxStore>) -> Self {
+        Self::from_config(store, AppConfig::from_env())
+    }
+
+    pub fn from_config(store: Arc<dyn TypenxStore>, config: AppConfig) -> Self {
+        let mut providers: HashMap<AuthProvider, Arc<dyn AnimeProviderClient>> = HashMap::new();
+        if let (Ok(client_id), Ok(client_secret)) = (
+            env::var("ANILIST_CLIENT_ID"),
+            env::var("ANILIST_CLIENT_SECRET"),
+        ) {
+            providers.insert(
+                AuthProvider::AniList,
+                Arc::new(AniListClient::new(OAuthProviderConfig {
+                    client_id,
+                    client_secret,
+                    redirect_uri: config.callback_url(AuthProvider::AniList),
+                })),
+            );
+        }
+        if let (Ok(client_id), Ok(client_secret)) =
+            (env::var("MAL_CLIENT_ID"), env::var("MAL_CLIENT_SECRET"))
+        {
+            providers.insert(
+                AuthProvider::MyAnimeList,
+                Arc::new(MyAnimeListClient::new(OAuthProviderConfig {
+                    client_id,
+                    client_secret,
+                    redirect_uri: config.callback_url(AuthProvider::MyAnimeList),
+                })),
+            );
+        }
         Self {
             store,
             addon_client: RemoteAddonClient::new(),
+            config,
+            providers,
         }
+    }
+
+    #[cfg(test)]
+    pub fn with_provider(mut self, provider: Arc<dyn AnimeProviderClient>) -> Self {
+        self.providers.insert(provider.provider(), provider);
+        self
     }
 }
 
@@ -44,6 +125,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/auth/anilist/callback", get(auth_anilist_callback))
         .route("/auth/mal/login", get(auth_mal_login))
         .route("/auth/mal/callback", get(auth_mal_callback))
+        .route("/auth/logout", post(auth_logout))
         .route("/me", get(me))
         .route("/me/providers", get(me_providers))
         .route("/me/library", get(me_library))
@@ -67,6 +149,7 @@ pub fn build_router(state: AppState) -> Router {
         auth_anilist_callback,
         auth_mal_login,
         auth_mal_callback,
+        auth_logout,
         me,
         me_providers,
         me_library,
@@ -84,7 +167,8 @@ pub fn build_router(state: AppState) -> Router {
         OAuthLoginResponse,
         OAuthCallbackQuery,
         LoginResult,
-        ProviderIdentity,
+        CurrentUser,
+        ProviderAccount,
         User,
         LinkedProvider,
         Session,
@@ -105,7 +189,7 @@ pub struct HealthResponse {
     pub service: String,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct OAuthLoginResponse {
     pub provider: AuthProvider,
     pub authorization_url: String,
@@ -114,7 +198,30 @@ pub struct OAuthLoginResponse {
 #[derive(Debug, Deserialize, IntoParams, ToSchema)]
 pub struct OAuthCallbackQuery {
     pub code: String,
-    pub state: Option<String>,
+    pub state: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ProviderAccount {
+    pub id: Uuid,
+    pub provider: AuthProvider,
+    pub provider_user_id: String,
+    pub provider_username: String,
+    pub expires_at: Option<chrono::DateTime<Utc>>,
+    pub linked_at: chrono::DateTime<Utc>,
+}
+
+impl From<LinkedProvider> for ProviderAccount {
+    fn from(provider: LinkedProvider) -> Self {
+        Self {
+            id: provider.id,
+            provider: provider.provider,
+            provider_user_id: provider.provider_user_id,
+            provider_username: provider.provider_username,
+            expires_at: provider.expires_at,
+            linked_at: provider.linked_at,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -136,65 +243,97 @@ async fn openapi() -> Json<utoipa::openapi::OpenApi> {
 }
 
 #[utoipa::path(get, path = "/auth/anilist/login", responses((status = 200, body = OAuthLoginResponse)))]
-async fn auth_anilist_login() -> Json<OAuthLoginResponse> {
-    Json(oauth_login_response(AuthProvider::AniList))
+async fn auth_anilist_login(
+    State(state): State<AppState>,
+) -> Result<Json<OAuthLoginResponse>, ApiFailure> {
+    login_url(state, AuthProvider::AniList).await.map(Json)
 }
 
 #[utoipa::path(get, path = "/auth/mal/login", responses((status = 200, body = OAuthLoginResponse)))]
-async fn auth_mal_login() -> Json<OAuthLoginResponse> {
-    Json(oauth_login_response(AuthProvider::MyAnimeList))
+async fn auth_mal_login(
+    State(state): State<AppState>,
+) -> Result<Json<OAuthLoginResponse>, ApiFailure> {
+    login_url(state, AuthProvider::MyAnimeList).await.map(Json)
 }
 
 #[utoipa::path(
     get,
     path = "/auth/anilist/callback",
     params(OAuthCallbackQuery),
-    responses((status = 200, body = LoginResult))
+    responses((status = 302), (status = 400, body = ApiError))
 )]
 async fn auth_anilist_callback(
     State(state): State<AppState>,
     Query(query): Query<OAuthCallbackQuery>,
-) -> Result<Json<LoginResult>, ApiFailure> {
-    mocked_provider_login(state, AuthProvider::AniList, query.code)
-        .await
-        .map(Json)
+) -> Result<Response, ApiFailure> {
+    oauth_callback(state, AuthProvider::AniList, query).await
 }
 
 #[utoipa::path(
     get,
     path = "/auth/mal/callback",
     params(OAuthCallbackQuery),
-    responses((status = 200, body = LoginResult))
+    responses((status = 302), (status = 400, body = ApiError))
 )]
 async fn auth_mal_callback(
     State(state): State<AppState>,
     Query(query): Query<OAuthCallbackQuery>,
-) -> Result<Json<LoginResult>, ApiFailure> {
-    mocked_provider_login(state, AuthProvider::MyAnimeList, query.code)
-        .await
-        .map(Json)
+) -> Result<Response, ApiFailure> {
+    oauth_callback(state, AuthProvider::MyAnimeList, query).await
 }
 
-#[utoipa::path(get, path = "/me", responses((status = 501, body = ApiError)))]
-async fn me() -> ApiFailure {
-    ApiFailure::not_implemented("session extraction is planned after the storage/API skeleton")
+#[utoipa::path(post, path = "/auth/logout", responses((status = 204), (status = 401, body = ApiError)))]
+async fn auth_logout(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, ApiFailure> {
+    if let Some(session) = session_from_headers(&state, &headers).await? {
+        state.store.revoke_session(session.id).await?;
+    }
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&expired_session_cookie(&state.config)).expect("valid cookie"),
+    );
+    Ok(response)
 }
 
-#[utoipa::path(get, path = "/me/providers", responses((status = 501, body = ApiError)))]
-async fn me_providers() -> ApiFailure {
-    ApiFailure::not_implemented("session extraction is planned after the storage/API skeleton")
+#[utoipa::path(get, path = "/me", responses((status = 200, body = CurrentUser), (status = 401, body = ApiError)))]
+async fn me(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<CurrentUser>, ApiFailure> {
+    let (user, providers) = current_user(&state, &headers).await?;
+    Ok(Json(CurrentUser { user, providers }))
 }
 
-#[utoipa::path(get, path = "/me/library", responses((status = 501, body = ApiError)))]
-async fn me_library() -> ApiFailure {
-    ApiFailure::not_implemented("provider list sync is planned after OAuth clients are wired")
+#[utoipa::path(get, path = "/me/providers", responses((status = 200, body = Vec<ProviderAccount>), (status = 401, body = ApiError)))]
+async fn me_providers(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ProviderAccount>>, ApiFailure> {
+    let (_, providers) = current_user(&state, &headers).await?;
+    Ok(Json(
+        providers.into_iter().map(ProviderAccount::from).collect(),
+    ))
 }
 
-#[utoipa::path(get, path = "/me/progress", responses((status = 501, body = ApiError)))]
-async fn me_progress() -> ApiFailure {
-    ApiFailure::not_implemented(
-        "watch progress APIs are represented in storage but not exposed yet",
-    )
+#[utoipa::path(get, path = "/me/library", responses((status = 200), (status = 401, body = ApiError)))]
+async fn me_library(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<typenx_core::library::AnimeListEntry>>, ApiFailure> {
+    let (user, _) = current_user(&state, &headers).await?;
+    Ok(Json(state.store.list_library(user.id).await?))
+}
+
+#[utoipa::path(get, path = "/me/progress", responses((status = 200), (status = 401, body = ApiError)))]
+async fn me_progress(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<typenx_core::library::WatchProgress>>, ApiFailure> {
+    let (user, _) = current_user(&state, &headers).await?;
+    Ok(Json(state.store.list_watch_progress(user.id).await?))
 }
 
 #[utoipa::path(get, path = "/addons", responses((status = 200, body = Vec<AddonRegistration>)))]
@@ -261,12 +400,19 @@ async fn catalogs(
     Json(request): Json<CatalogRequest>,
 ) -> Result<Json<CatalogResponse>, ApiFailure> {
     let addon = first_enabled_addon(&state).await?;
-    Ok(Json(
-        state
-            .addon_client
-            .catalog(&addon.base_url, &request)
-            .await?,
-    ))
+    let cache_key = format!(
+        "catalog:{}",
+        serde_json::to_string(&request).unwrap_or_default()
+    );
+    if let Some(cached) = read_cache::<CatalogResponse>(&state, addon.id, &cache_key).await? {
+        return Ok(Json(cached));
+    }
+    let response = state
+        .addon_client
+        .catalog(&addon.base_url, &request)
+        .await?;
+    write_cache(&state, addon.id, cache_key, &response).await?;
+    Ok(Json(response))
 }
 
 #[utoipa::path(
@@ -280,9 +426,16 @@ async fn search(
     Json(request): Json<SearchRequest>,
 ) -> Result<Json<CatalogResponse>, ApiFailure> {
     let addon = first_enabled_addon(&state).await?;
-    Ok(Json(
-        state.addon_client.search(&addon.base_url, &request).await?,
-    ))
+    let cache_key = format!(
+        "search:{}",
+        serde_json::to_string(&request).unwrap_or_default()
+    );
+    if let Some(cached) = read_cache::<CatalogResponse>(&state, addon.id, &cache_key).await? {
+        return Ok(Json(cached));
+    }
+    let response = state.addon_client.search(&addon.base_url, &request).await?;
+    write_cache(&state, addon.id, cache_key, &response).await?;
+    Ok(Json(response))
 }
 
 #[utoipa::path(
@@ -296,68 +449,205 @@ async fn anime_meta(
     Path(id): Path<String>,
 ) -> Result<Json<AnimeMetadata>, ApiFailure> {
     let addon = first_enabled_addon(&state).await?;
-    Ok(Json(
-        state.addon_client.anime_meta(&addon.base_url, &id).await?,
-    ))
-}
-
-fn oauth_login_response(provider: AuthProvider) -> OAuthLoginResponse {
-    OAuthLoginResponse {
-        provider,
-        authorization_url: format!(
-            "https://typenx.local/auth/{}/authorize-placeholder",
-            provider.as_str()
-        ),
+    let cache_key = format!("anime:{id}");
+    if let Some(cached) = read_cache::<AnimeMetadata>(&state, addon.id, &cache_key).await? {
+        return Ok(Json(cached));
     }
+    let response = state.addon_client.anime_meta(&addon.base_url, &id).await?;
+    write_cache(&state, addon.id, cache_key, &response).await?;
+    Ok(Json(response))
 }
 
-async fn mocked_provider_login(
+async fn login_url(
     state: AppState,
     provider: AuthProvider,
-    code: String,
-) -> Result<LoginResult, ApiFailure> {
+) -> Result<OAuthLoginResponse, ApiFailure> {
+    let provider_client = state
+        .providers
+        .get(&provider)
+        .ok_or_else(|| ApiFailure::not_configured(provider))?;
     let now = Utc::now();
-    let user = User {
-        id: Uuid::new_v4(),
-        display_name: format!("typenx-{code}"),
-        avatar_url: None,
-        created_at: now,
-        updated_at: now,
-    };
-    let linked_provider = LinkedProvider {
-        id: Uuid::new_v4(),
-        user_id: user.id,
+    let state_token = random_url_token(32);
+    let pkce_verifier = (provider == AuthProvider::MyAnimeList).then(new_mal_pkce_verifier);
+    let oauth_state = OAuthState {
+        state: state_token.clone(),
         provider,
-        provider_user_id: code.clone(),
-        provider_username: format!("provider-{code}"),
-        access_token: "mock-access-token".to_owned(),
-        refresh_token: None,
-        expires_at: None,
+        redirect_after: None,
+        pkce_verifier: pkce_verifier.clone(),
+        created_at: now,
+        expires_at: now + Duration::minutes(10),
+        consumed_at: None,
+    };
+    state.store.create_oauth_state(oauth_state).await?;
+    Ok(OAuthLoginResponse {
+        provider,
+        authorization_url: provider_client
+            .authorization_url(&state_token, pkce_verifier.as_deref()),
+    })
+}
+
+async fn oauth_callback(
+    state: AppState,
+    provider: AuthProvider,
+    query: OAuthCallbackQuery,
+) -> Result<Response, ApiFailure> {
+    let oauth_state = state
+        .store
+        .consume_oauth_state(&query.state, provider)
+        .await?
+        .ok_or_else(|| ApiFailure::bad_request("invalid oauth state"))?;
+    if oauth_state.expires_at < Utc::now() {
+        return Err(ApiFailure::bad_request("expired oauth state"));
+    }
+    let provider_client = state
+        .providers
+        .get(&provider)
+        .ok_or_else(|| ApiFailure::not_configured(provider))?;
+    let identity = provider_client
+        .exchange_code(&query.code, oauth_state.pkce_verifier.as_deref())
+        .await?;
+    let now = Utc::now();
+    let existing = state
+        .store
+        .find_linked_provider(identity.provider, &identity.provider_user_id)
+        .await?;
+    let user = if let Some(existing) = &existing {
+        state
+            .store
+            .get_user(existing.user_id)
+            .await?
+            .ok_or_else(|| ApiFailure::not_found("linked provider user missing"))?
+    } else {
+        state
+            .store
+            .upsert_user(User {
+                id: Uuid::new_v4(),
+                display_name: identity.username.clone(),
+                avatar_url: identity.avatar_url.clone(),
+                created_at: now,
+                updated_at: now,
+            })
+            .await?
+    };
+
+    let linked_provider = LinkedProvider {
+        id: existing
+            .map(|existing| existing.id)
+            .unwrap_or_else(Uuid::new_v4),
+        user_id: user.id,
+        provider: identity.provider,
+        provider_user_id: identity.provider_user_id.clone(),
+        provider_username: identity.username.clone(),
+        access_token: protect_token(&state.config.session_secret, &identity.access_token),
+        refresh_token: identity
+            .refresh_token
+            .as_ref()
+            .map(|token| protect_token(&state.config.session_secret, token)),
+        expires_at: identity.expires_at,
         linked_at: now,
     };
-    let session_token = Uuid::new_v4().to_string();
-    let session = Session {
-        id: Uuid::new_v4(),
-        user_id: user.id,
-        token_hash: session_token.clone(),
-        created_at: now,
-        expires_at: now + Duration::days(30),
-        revoked_at: None,
-    };
+    let linked_provider = state.store.upsert_linked_provider(linked_provider).await?;
 
-    state.store.upsert_user(user.clone()).await?;
-    state
+    if let Ok(sync) = provider_client.sync_list(&identity).await {
+        for mut entry in sync.entries {
+            entry.user_id = user.id;
+            let _ = state.store.upsert_library_entry(entry).await;
+        }
+    }
+
+    let session_token = random_url_token(48);
+    let session = state
         .store
-        .upsert_linked_provider(linked_provider.clone())
+        .create_session(Session {
+            id: Uuid::new_v4(),
+            user_id: user.id,
+            token_hash: hash_token(&state.config.session_secret, &session_token),
+            created_at: now,
+            expires_at: now + Duration::days(30),
+            revoked_at: None,
+        })
         .await?;
-    state.store.create_session(session.clone()).await?;
 
-    Ok(LoginResult {
+    let login_result = LoginResult {
         user,
         linked_provider,
         session,
-        session_token,
+        session_token: session_token.clone(),
+    };
+
+    let mut response = Redirect::to(&state.config.web_redirect_url).into_response();
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&session_cookie(&state.config, &session_token))
+            .expect("valid cookie"),
+    );
+    response.headers_mut().append(
+        "x-typenx-user-id",
+        HeaderValue::from_str(&login_result.user.id.to_string()).expect("uuid header"),
+    );
+    Ok(response)
+}
+
+async fn current_user(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<(User, Vec<LinkedProvider>), ApiFailure> {
+    let session = session_from_headers(state, headers)
+        .await?
+        .ok_or_else(|| ApiFailure::unauthorized("missing or invalid session"))?;
+    let user = state
+        .store
+        .get_user(session.user_id)
+        .await?
+        .ok_or_else(|| ApiFailure::unauthorized("session user missing"))?;
+    let providers = state.store.list_linked_providers(user.id).await?;
+    Ok((user, providers))
+}
+
+async fn session_from_headers(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<Option<Session>, ApiFailure> {
+    let Some(token) = session_token_from_headers(headers) else {
+        return Ok(None);
+    };
+    let token_hash = hash_token(&state.config.session_secret, &token);
+    let Some(session) = state.store.get_session_by_token_hash(&token_hash).await? else {
+        return Ok(None);
+    };
+    if session.revoked_at.is_some() || session.expires_at < Utc::now() {
+        return Ok(None);
+    }
+    Ok(Some(session))
+}
+
+fn session_token_from_headers(headers: &HeaderMap) -> Option<String> {
+    let cookie = headers.get(header::COOKIE)?.to_str().ok()?;
+    cookie.split(';').find_map(|part| {
+        let (name, value) = part.trim().split_once('=')?;
+        (name == SESSION_COOKIE).then(|| value.to_owned())
     })
+}
+
+fn session_cookie(config: &AppConfig, token: &str) -> String {
+    let secure = if config.secure_cookies {
+        "; Secure"
+    } else {
+        ""
+    };
+    format!(
+        "{SESSION_COOKIE}={token}; Path=/; Max-Age={}; HttpOnly; SameSite=Lax{secure}",
+        30 * 24 * 60 * 60
+    )
+}
+
+fn expired_session_cookie(config: &AppConfig) -> String {
+    let secure = if config.secure_cookies {
+        "; Secure"
+    } else {
+        ""
+    };
+    format!("{SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax{secure}")
 }
 
 async fn first_enabled_addon(state: &AppState) -> Result<AddonRegistration, ApiFailure> {
@@ -370,6 +660,49 @@ async fn first_enabled_addon(state: &AppState) -> Result<AddonRegistration, ApiF
         .ok_or_else(|| ApiFailure::not_found("no enabled addon registered"))
 }
 
+async fn read_cache<T: serde::de::DeserializeOwned>(
+    state: &AppState,
+    addon_id: Uuid,
+    cache_key: &str,
+) -> Result<Option<T>, ApiFailure> {
+    let Some(entry) = state.store.get_metadata_cache(addon_id, cache_key).await? else {
+        return Ok(None);
+    };
+    if entry.expires_at <= Utc::now() {
+        return Ok(None);
+    }
+    Ok(Some(serde_json::from_str(&entry.payload_json).map_err(
+        |error| ApiFailure {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: error.to_string(),
+        },
+    )?))
+}
+
+async fn write_cache<T: Serialize>(
+    state: &AppState,
+    addon_id: Uuid,
+    cache_key: String,
+    payload: &T,
+) -> Result<(), ApiFailure> {
+    let now = Utc::now();
+    state
+        .store
+        .set_metadata_cache(MetadataCacheEntry {
+            id: Uuid::new_v4(),
+            addon_id,
+            cache_key,
+            payload_json: serde_json::to_string(payload).map_err(|error| ApiFailure {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                message: error.to_string(),
+            })?,
+            expires_at: now + Duration::hours(1),
+            created_at: now,
+        })
+        .await?;
+    Ok(())
+}
+
 #[derive(Debug)]
 pub struct ApiFailure {
     status: StatusCode,
@@ -377,6 +710,20 @@ pub struct ApiFailure {
 }
 
 impl ApiFailure {
+    fn bad_request(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: message.into(),
+        }
+    }
+
+    fn unauthorized(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            message: message.into(),
+        }
+    }
+
     fn not_found(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::NOT_FOUND,
@@ -384,16 +731,16 @@ impl ApiFailure {
         }
     }
 
-    fn not_implemented(message: impl Into<String>) -> Self {
+    fn not_configured(provider: AuthProvider) -> Self {
         Self {
-            status: StatusCode::NOT_IMPLEMENTED,
-            message: message.into(),
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: format!("{} oauth is not configured", provider.as_str()),
         }
     }
 }
 
 impl IntoResponse for ApiFailure {
-    fn into_response(self) -> axum::response::Response {
+    fn into_response(self) -> Response {
         (
             self.status,
             Json(ApiError {
@@ -422,16 +769,31 @@ impl From<typenx_core::addons::AddonClientError> for ApiFailure {
     }
 }
 
+impl From<typenx_core::providers::ProviderError> for ApiFailure {
+    fn from(error: typenx_core::providers::ProviderError) -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            message: error.to_string(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use axum::{body::Body, http::Request};
     use tower::ServiceExt;
+    use typenx_core::{
+        auth::ProviderIdentity,
+        library::{ProviderListSync, WatchStatus},
+        providers::ProviderError,
+    };
     use typenx_storage::memory::MemoryStore;
 
     #[tokio::test]
     async fn openapi_endpoint_returns_schema() {
-        let state = AppState::new(Arc::new(MemoryStore::default()));
+        let state = test_state();
         let response = build_router(state)
             .oneshot(Request::get("/openapi.json").body(Body::empty()).unwrap())
             .await
@@ -440,16 +802,137 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mocked_oauth_callback_creates_login_result() {
-        let state = AppState::new(Arc::new(MemoryStore::default()));
-        let response = build_router(state)
+    async fn login_callback_sets_cookie_and_me_reads_session() {
+        let state = test_state().with_provider(Arc::new(FakeProvider));
+        let router = build_router(state);
+
+        let login_response = router
+            .clone()
             .oneshot(
-                Request::get("/auth/anilist/callback?code=test-user")
+                Request::get("/auth/anilist/login")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(login_response.status(), StatusCode::OK);
+
+        let callback_response = router
+            .clone()
+            .oneshot(
+                Request::get("/auth/anilist/callback?code=test-user&state=state-for-tests")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(callback_response.status(), StatusCode::BAD_REQUEST);
+
+        let login_body = axum::body::to_bytes(login_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let login: OAuthLoginResponse = serde_json::from_slice(&login_body).unwrap();
+        let callback_url = login
+            .authorization_url
+            .split("state=")
+            .nth(1)
+            .expect("state exists")
+            .to_owned();
+        let callback_response = router
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/auth/anilist/callback?code=test-user&state={callback_url}"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(callback_response.status(), StatusCode::SEE_OTHER);
+        let cookie = callback_response
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+
+        let me_response = router
+            .oneshot(
+                Request::get("/me")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(me_response.status(), StatusCode::OK);
+    }
+
+    fn test_state() -> AppState {
+        AppState::from_config(
+            Arc::new(MemoryStore::default()),
+            AppConfig {
+                public_base_url: "http://127.0.0.1:8080".to_owned(),
+                web_redirect_url: "http://127.0.0.1:3000".to_owned(),
+                session_secret: "test-secret".to_owned(),
+                secure_cookies: false,
+            },
+        )
+    }
+
+    struct FakeProvider;
+
+    #[async_trait]
+    impl AnimeProviderClient for FakeProvider {
+        fn provider(&self) -> AuthProvider {
+            AuthProvider::AniList
+        }
+
+        fn authorization_url(&self, state: &str, _pkce_challenge: Option<&str>) -> String {
+            format!("https://example.test/oauth?state={state}")
+        }
+
+        async fn exchange_code(
+            &self,
+            code: &str,
+            _pkce_verifier: Option<&str>,
+        ) -> Result<ProviderIdentity, ProviderError> {
+            Ok(ProviderIdentity {
+                provider: AuthProvider::AniList,
+                provider_user_id: "100".to_owned(),
+                username: code.to_owned(),
+                avatar_url: None,
+                access_token: "access-token".to_owned(),
+                refresh_token: None,
+                expires_at: None,
+            })
+        }
+
+        async fn sync_list(
+            &self,
+            identity: &ProviderIdentity,
+        ) -> Result<ProviderListSync, ProviderError> {
+            Ok(ProviderListSync {
+                provider: identity.provider,
+                entries: vec![typenx_core::library::AnimeListEntry {
+                    id: Uuid::new_v4(),
+                    user_id: Uuid::nil(),
+                    provider: identity.provider,
+                    provider_anime_id: "1".to_owned(),
+                    title: "Frieren".to_owned(),
+                    status: WatchStatus::Watching,
+                    score: Some(10.0),
+                    progress_episodes: 4,
+                    total_episodes: Some(28),
+                    updated_at: Utc::now(),
+                }],
+                synced_at: Utc::now(),
+            })
+        }
     }
 }

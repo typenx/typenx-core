@@ -2075,9 +2075,14 @@ name = "typenx-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64",
  "chrono",
+ "hmac",
+ "rand 0.8.6",
  "reqwest",
  "serde",
+ "serde_json",
+ "sha2",
  "thiserror",
  "typenx-addon-sdk-schema",
  "url",
@@ -2086,19 +2091,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "typenx-dev-server"
-version = "0.1.0"
-
-[[package]]
 name = "typenx-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
+ "base64",
  "chrono",
+ "hmac",
  "http",
+ "rand 0.8.6",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
  "tower",
  "tower-http",
