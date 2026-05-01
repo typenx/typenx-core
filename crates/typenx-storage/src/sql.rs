@@ -594,6 +594,10 @@ fn row_to_linked_provider(row: sqlx::any::AnyRow) -> Result<LinkedProvider, Stor
 }
 
 fn row_to_library_entry(row: sqlx::any::AnyRow) -> Result<AnimeListEntry, StorageError> {
+    let score = row
+        .try_get::<Option<f64>, _>("score")?
+        .map(|value| value as f32);
+
     Ok(AnimeListEntry {
         id: parse_uuid(row.try_get::<String, _>("id")?)?,
         user_id: parse_uuid(row.try_get::<String, _>("user_id")?)?,
@@ -601,7 +605,7 @@ fn row_to_library_entry(row: sqlx::any::AnyRow) -> Result<AnimeListEntry, Storag
         provider_anime_id: row.try_get("provider_anime_id")?,
         title: row.try_get("title")?,
         status: parse_status(&row.try_get::<String, _>("status")?),
-        score: row.try_get("score")?,
+        score,
         progress_episodes: row.try_get::<i64, _>("progress_episodes")? as u32,
         total_episodes: row
             .try_get::<Option<i64>, _>("total_episodes")?
