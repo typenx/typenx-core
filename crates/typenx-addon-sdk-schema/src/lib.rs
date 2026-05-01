@@ -63,16 +63,19 @@ pub struct SearchRequest {
     pub limit: Option<u32>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq)]
 pub struct CatalogResponse {
     pub items: Vec<AnimePreview>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq)]
 pub struct AnimePreview {
     pub id: String,
     pub title: String,
     pub poster: Option<String>,
+    pub banner: Option<String>,
+    pub synopsis: Option<String>,
+    pub score: Option<f32>,
     pub year: Option<i32>,
     pub content_type: ContentType,
 }
@@ -82,24 +85,69 @@ pub struct AnimeMetadata {
     pub id: String,
     pub title: String,
     pub original_title: Option<String>,
+    #[serde(default)]
+    pub alternative_titles: Vec<String>,
     pub synopsis: Option<String>,
+    pub description: Option<String>,
     pub poster: Option<String>,
     pub banner: Option<String>,
     pub year: Option<i32>,
+    pub season: Option<String>,
+    pub season_year: Option<i32>,
     pub status: Option<String>,
+    pub content_type: ContentType,
+    pub source: Option<String>,
+    pub duration_minutes: Option<u32>,
+    pub episode_count: Option<u32>,
+    pub score: Option<f32>,
+    pub rank: Option<u32>,
+    pub popularity: Option<u32>,
+    pub rating: Option<String>,
+    #[serde(default)]
     pub genres: Vec<String>,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub authors: Vec<String>,
+    #[serde(default)]
+    pub studios: Vec<String>,
+    #[serde(default)]
+    pub staff: Vec<StaffCredit>,
+    pub country_of_origin: Option<String>,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub site_url: Option<String>,
+    pub trailer_url: Option<String>,
+    #[serde(default)]
+    pub external_links: Vec<ExternalLink>,
+    #[serde(default)]
     pub episodes: Vec<EpisodeMetadata>,
     pub updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+pub struct StaffCredit {
+    pub name: String,
+    pub role: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+pub struct ExternalLink {
+    pub site: String,
+    pub url: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
 pub struct EpisodeMetadata {
     pub id: String,
     pub anime_id: String,
+    pub season_number: Option<u32>,
     pub number: u32,
     pub title: Option<String>,
     pub synopsis: Option<String>,
     pub thumbnail: Option<String>,
+    pub duration_minutes: Option<u32>,
+    pub source: Option<String>,
     pub aired_at: Option<DateTime<Utc>>,
 }
 
