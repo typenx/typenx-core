@@ -132,6 +132,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/auth/mal/callback", get(auth_mal_callback))
         .route("/auth/logout", post(auth_logout))
         .route("/me", get(me))
+        .route("/profile", get(profile))
         .route("/me/providers", get(me_providers))
         .route("/me/library", get(me_library))
         .route("/me/progress", get(me_progress))
@@ -187,6 +188,7 @@ fn origin_from_url(url: &str) -> Option<String> {
         auth_mal_callback,
         auth_logout,
         me,
+        profile,
         me_providers,
         me_library,
         me_progress,
@@ -341,6 +343,15 @@ async fn me(
 ) -> Result<Json<CurrentUser>, ApiFailure> {
     let (user, providers) = current_user(&state, &headers).await?;
     Ok(Json(CurrentUser { user, providers }))
+}
+
+#[utoipa::path(get, path = "/profile", responses((status = 200, body = User), (status = 401, body = ApiError)))]
+async fn profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<User>, ApiFailure> {
+    let (user, _) = current_user(&state, &headers).await?;
+    Ok(Json(user))
 }
 
 #[utoipa::path(get, path = "/me/providers", responses((status = 200, body = Vec<ProviderAccount>), (status = 401, body = ApiError)))]
@@ -548,11 +559,15 @@ async fn oauth_callback(
         .find_linked_provider(identity.provider, &identity.provider_user_id)
         .await?;
     let user = if let Some(existing) = &existing {
-        state
+        let mut user = state
             .store
             .get_user(existing.user_id)
             .await?
-            .ok_or_else(|| ApiFailure::not_found("linked provider user missing"))?
+            .ok_or_else(|| ApiFailure::not_found("linked provider user missing"))?;
+        user.display_name = identity.username.clone();
+        user.avatar_url = identity.avatar_url.clone().or(user.avatar_url);
+        user.updated_at = now;
+        state.store.upsert_user(user).await?
     } else {
         state
             .store
@@ -898,15 +913,35 @@ mod tests {
             .to_owned();
 
         let me_response = router
+            .clone()
             .oneshot(
                 Request::get("/me")
-                    .header(header::COOKIE, cookie)
+                    .header(header::COOKIE, cookie.clone())
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(me_response.status(), StatusCode::OK);
+
+        let profile_response = router
+            .oneshot(
+                Request::get("/profile")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(profile_response.status(), StatusCode::OK);
+        let profile_body = axum::body::to_bytes(profile_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let profile: User = serde_json::from_slice(&profile_body).unwrap();
+        assert_eq!(
+            profile.avatar_url.as_deref(),
+            Some("https://example.test/avatar.png")
+        );
     }
 
     fn test_state() -> AppState {
@@ -942,7 +977,7 @@ mod tests {
                 provider: AuthProvider::AniList,
                 provider_user_id: "100".to_owned(),
                 username: code.to_owned(),
-                avatar_url: None,
+                avatar_url: Some("https://example.test/avatar.png".to_owned()),
                 access_token: "access-token".to_owned(),
                 refresh_token: None,
                 expires_at: None,
