@@ -2,14 +2,17 @@ use std::{collections::HashMap, env, sync::Arc};
 
 use axum::{
     extract::{Path, Query, State},
-    http::{header, HeaderMap, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderValue, Method, StatusCode},
     response::{IntoResponse, Json, Redirect, Response},
     routing::{get, post},
     Router,
 };
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
+use tower_http::{
+    cors::{AllowOrigin, CorsLayer},
+    trace::TraceLayer,
+};
 use typenx_addon_sdk_schema::{
     AddonManifest, AnimeMetadata, CatalogRequest, CatalogResponse, SearchRequest,
 };
@@ -118,6 +121,8 @@ impl AppState {
 }
 
 pub fn build_router(state: AppState) -> Router {
+    let cors = cors_layer(&state.config);
+
     Router::new()
         .route("/health", get(health))
         .route("/openapi.json", get(openapi))
@@ -135,9 +140,40 @@ pub fn build_router(state: AppState) -> Router {
         .route("/catalogs", post(catalogs))
         .route("/search", post(search))
         .route("/anime/{id}", get(anime_meta))
-        .layer(CorsLayer::permissive())
+        .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+fn cors_layer(config: &AppConfig) -> CorsLayer {
+    let mut allowed_origins = vec![
+        "http://127.0.0.1:3000".to_owned(),
+        "http://localhost:3000".to_owned(),
+    ];
+    if let Some(origin) = origin_from_url(&config.web_redirect_url) {
+        allowed_origins.push(origin);
+    }
+
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(move |origin, _| {
+            origin
+                .to_str()
+                .is_ok_and(|origin| allowed_origins.iter().any(|allowed| allowed == origin))
+        }))
+        .allow_credentials(true)
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers([header::ACCEPT, header::CONTENT_TYPE])
+}
+
+fn origin_from_url(url: &str) -> Option<String> {
+    let scheme_end = url.find("://")? + 3;
+    let rest = &url[scheme_end..];
+    let host_end = rest.find('/').unwrap_or(rest.len());
+    Some(
+        url[..scheme_end + host_end]
+            .trim_end_matches('/')
+            .to_owned(),
+    )
 }
 
 #[derive(OpenApi)]
