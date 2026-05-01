@@ -49,6 +49,7 @@ pub struct CatalogFilter {
 
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
 pub struct CatalogRequest {
+    pub addon_id: Option<String>,
     pub catalog_id: String,
     pub skip: Option<u32>,
     pub limit: Option<u32>,
@@ -57,6 +58,7 @@ pub struct CatalogRequest {
 
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
 pub struct SearchRequest {
+    pub addon_id: Option<String>,
     pub query: String,
     pub limit: Option<u32>,
 }

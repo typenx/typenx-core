@@ -141,8 +141,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/openapi.json", get(openapi))
         .route("/auth/anilist/login", get(auth_anilist_login))
+        .route("/auth/anilist/link", get(auth_anilist_link))
         .route("/auth/anilist/callback", get(auth_anilist_callback))
         .route("/auth/mal/login", get(auth_mal_login))
+        .route("/auth/mal/link", get(auth_mal_link))
         .route("/auth/mal/callback", get(auth_mal_callback))
         .route("/auth/logout", post(auth_logout))
         .route("/me", get(me))
@@ -198,8 +200,10 @@ fn origin_from_url(url: &str) -> Option<String> {
         health,
         openapi,
         auth_anilist_login,
+        auth_anilist_link,
         auth_anilist_callback,
         auth_mal_login,
+        auth_mal_link,
         auth_mal_callback,
         auth_logout,
         me,
@@ -304,11 +308,31 @@ async fn auth_anilist_login(
     login_url(state, AuthProvider::AniList).await.map(Json)
 }
 
+#[utoipa::path(get, path = "/auth/anilist/link", responses((status = 200, body = OAuthLoginResponse), (status = 401, body = ApiError)))]
+async fn auth_anilist_link(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<OAuthLoginResponse>, ApiFailure> {
+    link_url(state, AuthProvider::AniList, &headers)
+        .await
+        .map(Json)
+}
+
 #[utoipa::path(get, path = "/auth/mal/login", responses((status = 200, body = OAuthLoginResponse)))]
 async fn auth_mal_login(
     State(state): State<AppState>,
 ) -> Result<Json<OAuthLoginResponse>, ApiFailure> {
     login_url(state, AuthProvider::MyAnimeList).await.map(Json)
+}
+
+#[utoipa::path(get, path = "/auth/mal/link", responses((status = 200, body = OAuthLoginResponse), (status = 401, body = ApiError)))]
+async fn auth_mal_link(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<OAuthLoginResponse>, ApiFailure> {
+    link_url(state, AuthProvider::MyAnimeList, &headers)
+        .await
+        .map(Json)
 }
 
 #[utoipa::path(
@@ -319,9 +343,10 @@ async fn auth_mal_login(
 )]
 async fn auth_anilist_callback(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(query): Query<OAuthCallbackQuery>,
 ) -> Result<Response, ApiFailure> {
-    oauth_callback(state, AuthProvider::AniList, query).await
+    oauth_callback(state, AuthProvider::AniList, query, &headers).await
 }
 
 #[utoipa::path(
@@ -332,9 +357,10 @@ async fn auth_anilist_callback(
 )]
 async fn auth_mal_callback(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Query(query): Query<OAuthCallbackQuery>,
 ) -> Result<Response, ApiFailure> {
-    oauth_callback(state, AuthProvider::MyAnimeList, query).await
+    oauth_callback(state, AuthProvider::MyAnimeList, query, &headers).await
 }
 
 #[utoipa::path(post, path = "/auth/logout", responses((status = 204), (status = 401, body = ApiError)))]
@@ -488,7 +514,7 @@ async fn catalogs(
     State(state): State<AppState>,
     Json(request): Json<CatalogRequest>,
 ) -> Result<Json<CatalogResponse>, ApiFailure> {
-    let addon = first_enabled_addon(&state).await?;
+    let addon = select_enabled_addon(&state, parse_addon_id(request.addon_id.as_deref())?).await?;
     let cache_key = format!(
         "catalog:{}",
         serde_json::to_string(&request).unwrap_or_default()
@@ -514,7 +540,7 @@ async fn search(
     State(state): State<AppState>,
     Json(request): Json<SearchRequest>,
 ) -> Result<Json<CatalogResponse>, ApiFailure> {
-    let addon = first_enabled_addon(&state).await?;
+    let addon = select_enabled_addon(&state, parse_addon_id(request.addon_id.as_deref())?).await?;
     let cache_key = format!(
         "search:{}",
         serde_json::to_string(&request).unwrap_or_default()
@@ -536,8 +562,9 @@ async fn search(
 async fn anime_meta(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<AddonSelectionQuery>,
 ) -> Result<Json<AnimeMetadata>, ApiFailure> {
-    let addon = first_enabled_addon(&state).await?;
+    let addon = select_enabled_addon(&state, query.addon_id).await?;
     let cache_key = format!("anime:{id}");
     if let Some(cached) = read_cache::<AnimeMetadata>(&state, addon.id, &cache_key).await? {
         return Ok(Json(cached));
@@ -551,6 +578,23 @@ async fn login_url(
     state: AppState,
     provider: AuthProvider,
 ) -> Result<OAuthLoginResponse, ApiFailure> {
+    oauth_url(state, provider, None).await
+}
+
+async fn link_url(
+    state: AppState,
+    provider: AuthProvider,
+    headers: &HeaderMap,
+) -> Result<OAuthLoginResponse, ApiFailure> {
+    current_user(&state, headers).await?;
+    oauth_url(state, provider, Some("/settings".to_owned())).await
+}
+
+async fn oauth_url(
+    state: AppState,
+    provider: AuthProvider,
+    redirect_after: Option<String>,
+) -> Result<OAuthLoginResponse, ApiFailure> {
     let provider_client = state
         .providers
         .get(&provider)
@@ -561,7 +605,7 @@ async fn login_url(
     let oauth_state = OAuthState {
         state: state_token.clone(),
         provider,
-        redirect_after: None,
+        redirect_after,
         pkce_verifier: pkce_verifier.clone(),
         created_at: now,
         expires_at: now + Duration::minutes(10),
@@ -579,6 +623,7 @@ async fn oauth_callback(
     state: AppState,
     provider: AuthProvider,
     query: OAuthCallbackQuery,
+    headers: &HeaderMap,
 ) -> Result<Response, ApiFailure> {
     let oauth_state = state
         .store
@@ -600,7 +645,28 @@ async fn oauth_callback(
         .store
         .find_linked_provider(identity.provider, &identity.provider_user_id)
         .await?;
-    let user = if let Some(existing) = &existing {
+    let link_target = if oauth_state.redirect_after.is_some() {
+        Some(current_user(&state, headers).await?.0)
+    } else {
+        None
+    };
+
+    let user = if let Some(mut user) = link_target {
+        if let Some(existing) = &existing {
+            if existing.user_id != user.id {
+                return Err(ApiFailure::conflict(
+                    "provider account is already linked to another user",
+                ));
+            }
+        }
+        if user.avatar_url.is_none() && identity.avatar_url.is_some() {
+            user.avatar_url = identity.avatar_url.clone();
+            user.updated_at = now;
+            state.store.upsert_user(user).await?
+        } else {
+            user
+        }
+    } else if let Some(existing) = &existing {
         let mut user = state
             .store
             .get_user(existing.user_id)
@@ -668,7 +734,11 @@ async fn oauth_callback(
         session_token: session_token.clone(),
     };
 
-    let mut response = Redirect::to(&state.config.web_redirect_url).into_response();
+    let mut response = Redirect::to(&web_redirect_url(
+        &state.config,
+        oauth_state.redirect_after.as_deref(),
+    ))
+    .into_response();
     response.headers_mut().append(
         header::SET_COOKIE,
         HeaderValue::from_str(&session_cookie(&state.config, &session_token))
@@ -679,6 +749,15 @@ async fn oauth_callback(
         HeaderValue::from_str(&login_result.user.id.to_string()).expect("uuid header"),
     );
     Ok(response)
+}
+
+fn web_redirect_url(config: &AppConfig, redirect_after: Option<&str>) -> String {
+    let base = config.web_redirect_url.trim_end_matches('/');
+    match redirect_after {
+        Some(path) if path.starts_with('/') => format!("{base}{path}"),
+        Some(path) => format!("{base}/{path}"),
+        None => base.to_owned(),
+    }
 }
 
 async fn current_user(
@@ -743,12 +822,35 @@ fn expired_session_cookie(config: &AppConfig) -> String {
     format!("{SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax{secure}")
 }
 
-async fn first_enabled_addon(state: &AppState) -> Result<AddonRegistration, ApiFailure> {
-    list_all_addons(state)
-        .await?
+#[derive(Debug, Deserialize, IntoParams)]
+struct AddonSelectionQuery {
+    addon_id: Option<Uuid>,
+}
+
+async fn select_enabled_addon(
+    state: &AppState,
+    addon_id: Option<Uuid>,
+) -> Result<AddonRegistration, ApiFailure> {
+    let addons = list_all_addons(state).await?;
+    if let Some(addon_id) = addon_id {
+        return addons
+            .into_iter()
+            .find(|addon| addon.enabled && addon.id == addon_id)
+            .ok_or_else(|| ApiFailure::not_found("enabled addon not found"));
+    }
+
+    addons
         .into_iter()
         .find(|addon| addon.enabled)
         .ok_or_else(|| ApiFailure::not_found("no enabled addon registered"))
+}
+
+fn parse_addon_id(addon_id: Option<&str>) -> Result<Option<Uuid>, ApiFailure> {
+    addon_id
+        .map(|addon_id| {
+            Uuid::parse_str(addon_id).map_err(|_| ApiFailure::bad_request("invalid addon_id"))
+        })
+        .transpose()
 }
 
 async fn list_all_addons(state: &AppState) -> Result<Vec<AddonRegistration>, ApiFailure> {
@@ -848,6 +950,13 @@ impl ApiFailure {
         }
     }
 
+    fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            message: message.into(),
+        }
+    }
+
     fn not_configured(provider: AuthProvider) -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
@@ -920,7 +1029,9 @@ mod tests {
 
     #[tokio::test]
     async fn login_callback_sets_cookie_and_me_reads_session() {
-        let state = test_state().with_provider(Arc::new(TestAnimeProvider));
+        let state = test_state().with_provider(Arc::new(TestAnimeProvider {
+            provider: AuthProvider::AniList,
+        }));
         let router = build_router(state);
 
         let login_response = router
@@ -1010,6 +1121,119 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn settings_link_flow_adds_second_provider_to_current_user() {
+        let state = test_state()
+            .with_provider(Arc::new(TestAnimeProvider {
+                provider: AuthProvider::AniList,
+            }))
+            .with_provider(Arc::new(TestAnimeProvider {
+                provider: AuthProvider::MyAnimeList,
+            }));
+        let router = build_router(state);
+
+        let anilist_login = router
+            .clone()
+            .oneshot(
+                Request::get("/auth/anilist/login")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let anilist_body = axum::body::to_bytes(anilist_login.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let anilist_login: OAuthLoginResponse = serde_json::from_slice(&anilist_body).unwrap();
+        let anilist_state = anilist_login
+            .authorization_url
+            .split("state=")
+            .nth(1)
+            .expect("state exists")
+            .to_owned();
+
+        let anilist_callback = router
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/auth/anilist/callback?code=anilist-user&state={anilist_state}"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let cookie = anilist_callback
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+
+        let mal_link = router
+            .clone()
+            .oneshot(
+                Request::get("/auth/mal/link")
+                    .header(header::COOKIE, cookie.clone())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(mal_link.status(), StatusCode::OK);
+        let mal_body = axum::body::to_bytes(mal_link.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let mal_link: OAuthLoginResponse = serde_json::from_slice(&mal_body).unwrap();
+        let mal_state = mal_link
+            .authorization_url
+            .split("state=")
+            .nth(1)
+            .expect("state exists")
+            .to_owned();
+
+        let mal_callback = router
+            .clone()
+            .oneshot(
+                Request::get(format!(
+                    "/auth/mal/callback?code=mal-user&state={mal_state}"
+                ))
+                .header(header::COOKIE, cookie.clone())
+                .body(Body::empty())
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(mal_callback.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            mal_callback.headers().get(header::LOCATION).unwrap(),
+            "http://127.0.0.1:3000/settings"
+        );
+
+        let me_response = router
+            .oneshot(
+                Request::get("/me")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let me_body = axum::body::to_bytes(me_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let me: CurrentUser = serde_json::from_slice(&me_body).unwrap();
+        assert_eq!(me.providers.len(), 2);
+        assert!(me
+            .providers
+            .iter()
+            .all(|provider| provider.user_id == me.user.id));
+    }
+
     fn test_state() -> AppState {
         AppState::from_config(
             Arc::new(MemoryStore::default()),
@@ -1023,12 +1247,14 @@ mod tests {
         )
     }
 
-    struct TestAnimeProvider;
+    struct TestAnimeProvider {
+        provider: AuthProvider,
+    }
 
     #[async_trait]
     impl AnimeProviderClient for TestAnimeProvider {
         fn provider(&self) -> AuthProvider {
-            AuthProvider::AniList
+            self.provider
         }
 
         fn authorization_url(&self, state: &str, _pkce_challenge: Option<&str>) -> String {
@@ -1040,9 +1266,10 @@ mod tests {
             code: &str,
             _pkce_verifier: Option<&str>,
         ) -> Result<ProviderIdentity, ProviderError> {
+            let provider_prefix = self.provider.as_str();
             Ok(ProviderIdentity {
-                provider: AuthProvider::AniList,
-                provider_user_id: "100".to_owned(),
+                provider: self.provider,
+                provider_user_id: format!("{provider_prefix}-100"),
                 username: code.to_owned(),
                 avatar_url: Some("https://example.test/avatar.png".to_owned()),
                 access_token: "access-token".to_owned(),
