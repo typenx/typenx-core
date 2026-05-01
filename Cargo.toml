@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/typenx-addon-sdk-schema",
+    "crates/typenx-core",
+    "crates/typenx-dev-server",
+    "crates/typenx-storage",
+    "crates/typenx-server",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/typenx/typenx-core"
+rust-version = "1.77"
+version = "0.1.0"
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+axum = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+http = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8", default-features = false, features = ["any", "chrono", "macros", "migrate", "mysql", "postgres", "runtime-tokio-rustls", "sqlite", "uuid"] }
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
+uuid = { version = "1", features = ["serde", "v4"] }

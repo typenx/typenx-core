@@ -1,0 +1,21 @@
+[package]
+name = "typenx-storage"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+chrono.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+typenx-addon-sdk-schema = { path = "../typenx-addon-sdk-schema" }
+typenx-core = { path = "../typenx-core" }
+uuid.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true

@@ -1,0 +1,18 @@
+[package]
+name = "typenx-core"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+typenx-addon-sdk-schema = { path = "../typenx-addon-sdk-schema" }
+url = "2"
+utoipa.workspace = true
+uuid.workspace = true

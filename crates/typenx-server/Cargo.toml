@@ -1,0 +1,25 @@
+[package]
+name = "typenx-server"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+chrono.workspace = true
+http.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tower-http.workspace = true
+typenx-addon-sdk-schema = { path = "../typenx-addon-sdk-schema" }
+typenx-core = { path = "../typenx-core" }
+typenx-storage = { path = "../typenx-storage" }
+utoipa.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tower = "0.5"
