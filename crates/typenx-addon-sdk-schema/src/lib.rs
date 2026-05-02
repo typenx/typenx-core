@@ -79,6 +79,8 @@ pub struct AnimePreview {
     pub year: Option<i32>,
     pub content_type: ContentType,
     #[serde(default)]
+    pub genres: Vec<String>,
+    #[serde(default)]
     pub season_entries: Vec<SeasonEntry>,
 }
 
@@ -206,6 +208,7 @@ mod tests {
             score: None,
             year: Some(2013),
             content_type: ContentType::Anime,
+            genres: vec!["Action".to_owned(), "Drama".to_owned()],
             season_entries: vec![SeasonEntry {
                 id: "aot-s2".to_owned(),
                 title: "Attack on Titan Season 2".to_owned(),
@@ -218,6 +221,7 @@ mod tests {
 
         let json = serde_json::to_string(&preview).unwrap();
         let roundtrip: AnimePreview = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip.genres, vec!["Action", "Drama"]);
         assert_eq!(roundtrip.season_entries[0].season_number, Some(2));
     }
 }
