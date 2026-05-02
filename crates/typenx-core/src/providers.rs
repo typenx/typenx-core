@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use crate::{
     auth::{AuthProvider, ProviderIdentity},
-    library::{AnimeListEntry, ProviderListSync, WatchStatus},
+    library::{AnimeListEntry, ProviderListSync, ProviderListUpdate, WatchStatus},
     security::random_url_token,
 };
 
@@ -24,6 +24,11 @@ pub trait AnimeProviderClient: Send + Sync {
         &self,
         identity: &ProviderIdentity,
     ) -> Result<ProviderListSync, ProviderError>;
+    async fn update_list_entry(
+        &self,
+        identity: &ProviderIdentity,
+        update: ProviderListUpdate,
+    ) -> Result<(), ProviderError>;
 }
 
 #[derive(Clone, Debug)]
@@ -144,6 +149,29 @@ impl AnimeProviderClient for AniListClient {
             entries,
             synced_at: now,
         })
+    }
+
+    async fn update_list_entry(
+        &self,
+        identity: &ProviderIdentity,
+        update: ProviderListUpdate,
+    ) -> Result<(), ProviderError> {
+        let media_id = update
+            .provider_anime_id
+            .parse::<i64>()
+            .map_err(|_| ProviderError::InvalidData("invalid AniList media id".to_owned()))?;
+        self.graphql::<serde_json::Value>(
+            &identity.access_token,
+            ANILIST_UPDATE_MUTATION,
+            serde_json::json!({
+                "mediaId": media_id,
+                "status": anilist_status(update.status),
+                "progress": update.progress_episodes,
+                "score": update.score,
+            }),
+        )
+        .await?;
+        Ok(())
     }
 }
 
@@ -306,9 +334,56 @@ impl AnimeProviderClient for MyAnimeListClient {
             synced_at: now,
         })
     }
+
+    async fn update_list_entry(
+        &self,
+        identity: &ProviderIdentity,
+        update: ProviderListUpdate,
+    ) -> Result<(), ProviderError> {
+        let access_token = self.access_token(identity).await?;
+        let url = format!(
+            "{}/anime/{}/my_list_status",
+            self.api_url, update.provider_anime_id
+        );
+        let mut form = vec![("status", mal_status(update.status).to_owned())];
+        if let Some(progress) = update.progress_episodes {
+            form.push(("num_watched_episodes", progress.to_string()));
+        }
+        if let Some(score) = update.score.and_then(mal_score) {
+            form.push(("score", score.to_string()));
+        }
+        let response = self
+            .http
+            .patch(url)
+            .bearer_auth(&access_token)
+            .form(&form)
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(ProviderError::Request(format!(
+                "MAL list update returned HTTP {status}: {}",
+                truncate_body(&body)
+            )));
+        }
+        Ok(())
+    }
 }
 
 impl MyAnimeListClient {
+    async fn access_token(&self, identity: &ProviderIdentity) -> Result<String, ProviderError> {
+        if identity
+            .expires_at
+            .is_some_and(|expires_at| expires_at <= Utc::now())
+        {
+            if let Some(refresh_token) = &identity.refresh_token {
+                return Ok(self.refresh_access_token(refresh_token).await?.access_token);
+            }
+        }
+        Ok(identity.access_token.clone())
+    }
+
     async fn refresh_access_token(
         &self,
         refresh_token: &str,
@@ -571,6 +646,33 @@ fn parse_watch_status(status: Option<&str>) -> WatchStatus {
     }
 }
 
+fn anilist_status(status: WatchStatus) -> &'static str {
+    match status {
+        WatchStatus::Completed => "COMPLETED",
+        WatchStatus::Paused => "PAUSED",
+        WatchStatus::Dropped => "DROPPED",
+        WatchStatus::Planning => "PLANNING",
+        WatchStatus::Watching => "CURRENT",
+    }
+}
+
+fn mal_status(status: WatchStatus) -> &'static str {
+    match status {
+        WatchStatus::Completed => "completed",
+        WatchStatus::Paused => "on_hold",
+        WatchStatus::Dropped => "dropped",
+        WatchStatus::Planning => "plan_to_watch",
+        WatchStatus::Watching => "watching",
+    }
+}
+
+fn mal_score(score: f32) -> Option<u8> {
+    if !score.is_finite() {
+        return None;
+    }
+    Some(score.round().clamp(0.0, 10.0) as u8)
+}
+
 const ANILIST_VIEWER_QUERY: &str = r#"
 query Viewer {
   Viewer { id name avatar { large } }
@@ -590,6 +692,14 @@ query UserAnimeList($userId: Int) {
         media { title { romaji english } episodes }
       }
     }
+  }
+}
+"#;
+
+const ANILIST_UPDATE_MUTATION: &str = r#"
+mutation UpdateAnimeListEntry($mediaId: Int!, $status: MediaListStatus, $progress: Int, $score: Float) {
+  SaveMediaListEntry(mediaId: $mediaId, status: $status, progress: $progress, score: $score) {
+    id
   }
 }
 "#;

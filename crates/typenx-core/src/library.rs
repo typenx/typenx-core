@@ -48,3 +48,11 @@ pub struct ProviderListSync {
     pub entries: Vec<AnimeListEntry>,
     pub synced_at: DateTime<Utc>,
 }
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ProviderListUpdate {
+    pub provider_anime_id: String,
+    pub status: WatchStatus,
+    pub progress_episodes: Option<u32>,
+    pub score: Option<f32>,
+}

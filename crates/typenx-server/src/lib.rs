@@ -22,7 +22,8 @@ use typenx_core::{
         AddonRegistration, AddonSource, MetadataCacheEntry, RegisterAddonRequest, RemoteAddonClient,
     },
     auth::{AuthProvider, CurrentUser, LinkedProvider, LoginResult, OAuthState, Session, User},
-    library::WatchProgress,
+    auth::ProviderIdentity,
+    library::{AnimeListEntry, ProviderListUpdate, WatchProgress, WatchStatus},
     providers::{
         new_mal_pkce_verifier, AniListClient, AnimeProviderClient, MyAnimeListClient,
         OAuthProviderConfig,
@@ -31,7 +32,7 @@ use typenx_core::{
         default_candidate_requests, rank_recommendations, read_precomputed_recommendations,
         TasteProfile, TypenxRecommendationRequest,
     },
-    security::{hash_token, protect_token, random_url_token},
+    security::{hash_token, protect_token, random_url_token, unprotect_token},
 };
 use typenx_storage::TypenxStore;
 use utoipa::{IntoParams, OpenApi, ToSchema};
@@ -339,11 +340,13 @@ pub struct ProviderAccount {
 #[derive(Debug, Deserialize, Serialize, ToSchema)]
 pub struct UpsertWatchProgressRequest {
     pub anime_id: String,
+    pub anime_title: Option<String>,
     pub episode_id: Option<String>,
     pub episode_number: Option<u32>,
     pub position_seconds: u32,
     pub duration_seconds: Option<u32>,
     pub completed: bool,
+    pub score: Option<f32>,
 }
 
 impl From<LinkedProvider> for ProviderAccount {
@@ -579,19 +582,126 @@ async fn upsert_me_progress(
     headers: HeaderMap,
     Json(request): Json<UpsertWatchProgressRequest>,
 ) -> Result<Json<WatchProgress>, ApiFailure> {
-    let (user, _) = current_user(&state, &headers).await?;
+    let (user, providers) = current_user(&state, &headers).await?;
     let progress = WatchProgress {
         id: Uuid::new_v4(),
         user_id: user.id,
-        anime_id: request.anime_id,
-        episode_id: request.episode_id,
+        anime_id: request.anime_id.clone(),
+        episode_id: request.episode_id.clone(),
         episode_number: request.episode_number,
         position_seconds: request.position_seconds,
         duration_seconds: request.duration_seconds,
         completed: request.completed,
         updated_at: Utc::now(),
     };
-    Ok(Json(state.store.upsert_watch_progress(progress).await?))
+    let progress = state.store.upsert_watch_progress(progress).await?;
+    sync_progress_to_linked_providers(&state, user.id, &providers, &request, &progress).await;
+    Ok(Json(progress))
+}
+
+async fn sync_progress_to_linked_providers(
+    state: &AppState,
+    user_id: Uuid,
+    providers: &[LinkedProvider],
+    request: &UpsertWatchProgressRequest,
+    progress: &WatchProgress,
+) {
+    if !progress.completed && request.score.is_none() {
+        return;
+    }
+
+    let library = match state.store.list_library(user_id).await {
+        Ok(library) => library,
+        Err(_) => return,
+    };
+
+    for linked in providers {
+        let Some(client) = state.providers.get(&linked.provider) else {
+            continue;
+        };
+        let Some(entry) = provider_entry_for_progress(linked.provider, request, &library) else {
+            continue;
+        };
+        let target_progress = request
+            .episode_number
+            .map(|episode| entry.progress_episodes.max(episode));
+        let status = if progress.completed
+            && entry
+                .total_episodes
+                .is_some_and(|total| target_progress.is_some_and(|watched| watched >= total))
+        {
+            WatchStatus::Completed
+        } else {
+            WatchStatus::Watching
+        };
+        let update = ProviderListUpdate {
+            provider_anime_id: entry.provider_anime_id.clone(),
+            status,
+            progress_episodes: target_progress,
+            score: request.score.or(entry.score),
+        };
+        let Ok(identity) = provider_identity_from_linked(state, linked) else {
+            continue;
+        };
+        if client.update_list_entry(&identity, update.clone()).await.is_ok() {
+            let mut updated_entry = entry;
+            updated_entry.status = update.status;
+            if let Some(progress_episodes) = update.progress_episodes {
+                updated_entry.progress_episodes = progress_episodes;
+            }
+            if request.score.is_some() {
+                updated_entry.score = request.score;
+            }
+            updated_entry.updated_at = Utc::now();
+            let _ = state.store.upsert_library_entry(updated_entry).await;
+        }
+    }
+}
+
+fn provider_entry_for_progress(
+    provider: AuthProvider,
+    request: &UpsertWatchProgressRequest,
+    library: &[AnimeListEntry],
+) -> Option<AnimeListEntry> {
+    library
+        .iter()
+        .find(|entry| entry.provider == provider && entry.provider_anime_id == request.anime_id)
+        .or_else(|| {
+            let title = request.anime_title.as_deref().map(normalize_title)?;
+            library.iter().find(|entry| {
+                entry.provider == provider && normalize_title(&entry.title) == title
+            })
+        })
+        .cloned()
+}
+
+fn provider_identity_from_linked(
+    state: &AppState,
+    linked: &LinkedProvider,
+) -> Result<ProviderIdentity, ApiFailure> {
+    Ok(ProviderIdentity {
+        provider: linked.provider,
+        provider_user_id: linked.provider_user_id.clone(),
+        username: linked.provider_username.clone(),
+        avatar_url: None,
+        access_token: unprotect_token(&state.config.session_secret, &linked.access_token)
+            .map_err(|_| ApiFailure::unauthorized("linked provider token is invalid"))?,
+        refresh_token: linked
+            .refresh_token
+            .as_ref()
+            .map(|token| unprotect_token(&state.config.session_secret, token))
+            .transpose()
+            .map_err(|_| ApiFailure::unauthorized("linked provider token is invalid"))?,
+        expires_at: linked.expires_at,
+    })
+}
+
+fn normalize_title(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
 }
 
 #[utoipa::path(
@@ -1441,7 +1551,7 @@ mod tests {
     use tower::ServiceExt;
     use typenx_core::{
         auth::ProviderIdentity,
-        library::{ProviderListSync, WatchStatus},
+        library::{ProviderListSync, ProviderListUpdate, WatchStatus},
         providers::ProviderError,
     };
     use typenx_storage::memory::MemoryStore;
@@ -1860,6 +1970,14 @@ mod tests {
                 }],
                 synced_at: Utc::now(),
             })
+        }
+
+        async fn update_list_entry(
+            &self,
+            _identity: &ProviderIdentity,
+            _update: ProviderListUpdate,
+        ) -> Result<(), ProviderError> {
+            Ok(())
         }
     }
 }
