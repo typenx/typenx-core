@@ -113,6 +113,7 @@ pub fn default_candidate_requests(limit: u32, addon_id: Option<String>) -> Vec<C
         .map(|catalog_id| CatalogRequest {
             addon_id: addon_id.clone(),
             catalog_id: catalog_id.to_owned(),
+            content_type: Some(ContentType::Anime),
             skip: Some(0),
             limit: Some(limit),
             query: None,
@@ -317,6 +318,10 @@ fn score_bucket(score: f32) -> &'static str {
 fn content_type_key(content_type: &ContentType) -> &'static str {
     match content_type {
         ContentType::Anime => "anime",
+        ContentType::Manga => "manga",
+        ContentType::Manhwa => "manhwa",
+        ContentType::Manhua => "manhua",
+        ContentType::LightNovel => "light_novel",
         ContentType::Movie => "movie",
         ContentType::Ova => "ova",
         ContentType::Ona => "ona",

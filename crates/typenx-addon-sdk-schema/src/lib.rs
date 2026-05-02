@@ -32,10 +32,14 @@ pub struct CatalogDefinition {
     pub filters: Vec<CatalogFilter>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ContentType {
     Anime,
+    Manga,
+    Manhwa,
+    Manhua,
+    LightNovel,
     Movie,
     Ova,
     Ona,
@@ -53,6 +57,7 @@ pub struct CatalogFilter {
 pub struct CatalogRequest {
     pub addon_id: Option<String>,
     pub catalog_id: String,
+    pub content_type: Option<ContentType>,
     pub skip: Option<u32>,
     pub limit: Option<u32>,
     pub query: Option<String>,
@@ -63,6 +68,7 @@ pub struct SearchRequest {
     pub addon_id: Option<String>,
     pub query: String,
     pub limit: Option<u32>,
+    pub content_type: Option<ContentType>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]

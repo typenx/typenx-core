@@ -14,8 +14,8 @@ use tower_http::{
     trace::TraceLayer,
 };
 use typenx_addon_sdk_schema::{
-    AddonManifest, AnimeMetadata, CatalogRequest, CatalogResponse, RecommendationResponse,
-    SearchRequest, VideoSourceRequest, VideoSourceResponse,
+    AddonManifest, AnimeMetadata, CatalogRequest, CatalogResponse, ContentType,
+    RecommendationResponse, SearchRequest, VideoSourceRequest, VideoSourceResponse,
 };
 use typenx_core::{
     addons::{
@@ -206,6 +206,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/catalogs", post(catalogs))
         .route("/search", post(search))
         .route("/anime/{id}", get(anime_meta))
+        .route("/manga/catalogs", post(manga_catalogs))
+        .route("/manga/search", post(manga_search))
+        .route("/manga/{id}", get(manga_meta))
         .route("/videos", post(video_sources))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
@@ -271,6 +274,9 @@ fn origin_from_url(url: &str) -> Option<String> {
         catalogs,
         search,
         anime_meta,
+        manga_catalogs,
+        manga_search,
+        manga_meta,
         video_sources
     ),
     components(schemas(
@@ -781,6 +787,38 @@ async fn catalogs(
 
 #[utoipa::path(
     post,
+    path = "/manga/catalogs",
+    request_body = CatalogRequest,
+    responses((status = 200, body = CatalogResponse))
+)]
+async fn manga_catalogs(
+    State(state): State<AppState>,
+    Json(mut request): Json<CatalogRequest>,
+) -> Result<Json<CatalogResponse>, ApiFailure> {
+    request.content_type = Some(ContentType::Manga);
+    let addon = select_enabled_content_addon(
+        &state,
+        parse_addon_id(request.addon_id.as_deref())?,
+        ContentType::Manga,
+    )
+    .await?;
+    let cache_key = format!(
+        "manga:catalog:{}",
+        serde_json::to_string(&request).unwrap_or_default()
+    );
+    if let Some(cached) = read_cache::<CatalogResponse>(&state, addon.id, &cache_key).await? {
+        return Ok(Json(cached));
+    }
+    let response = state
+        .addon_client
+        .catalog(&addon.base_url, &request)
+        .await?;
+    write_cache(&state, addon.id, cache_key, &response).await?;
+    Ok(Json(response))
+}
+
+#[utoipa::path(
+    post,
     path = "/search",
     request_body = SearchRequest,
     responses((status = 200, body = CatalogResponse))
@@ -792,6 +830,35 @@ async fn search(
     let addon = select_enabled_addon(&state, parse_addon_id(request.addon_id.as_deref())?).await?;
     let cache_key = format!(
         "search:{}",
+        serde_json::to_string(&request).unwrap_or_default()
+    );
+    if let Some(cached) = read_cache::<CatalogResponse>(&state, addon.id, &cache_key).await? {
+        return Ok(Json(cached));
+    }
+    let response = state.addon_client.search(&addon.base_url, &request).await?;
+    write_cache(&state, addon.id, cache_key, &response).await?;
+    Ok(Json(response))
+}
+
+#[utoipa::path(
+    post,
+    path = "/manga/search",
+    request_body = SearchRequest,
+    responses((status = 200, body = CatalogResponse))
+)]
+async fn manga_search(
+    State(state): State<AppState>,
+    Json(mut request): Json<SearchRequest>,
+) -> Result<Json<CatalogResponse>, ApiFailure> {
+    request.content_type = Some(ContentType::Manga);
+    let addon = select_enabled_content_addon(
+        &state,
+        parse_addon_id(request.addon_id.as_deref())?,
+        ContentType::Manga,
+    )
+    .await?;
+    let cache_key = format!(
+        "manga:search:{}",
         serde_json::to_string(&request).unwrap_or_default()
     );
     if let Some(cached) = read_cache::<CatalogResponse>(&state, addon.id, &cache_key).await? {
@@ -815,6 +882,27 @@ async fn anime_meta(
 ) -> Result<Json<AnimeMetadata>, ApiFailure> {
     let addon = select_enabled_addon(&state, query.addon_id).await?;
     let cache_key = format!("anime:{id}");
+    if let Some(cached) = read_cache::<AnimeMetadata>(&state, addon.id, &cache_key).await? {
+        return Ok(Json(cached));
+    }
+    let response = state.addon_client.anime_meta(&addon.base_url, &id).await?;
+    write_cache(&state, addon.id, cache_key, &response).await?;
+    Ok(Json(response))
+}
+
+#[utoipa::path(
+    get,
+    path = "/manga/{id}",
+    params(("id" = String, Path, description = "Addon manga id")),
+    responses((status = 200, body = AnimeMetadata))
+)]
+async fn manga_meta(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<AddonSelectionQuery>,
+) -> Result<Json<AnimeMetadata>, ApiFailure> {
+    let addon = select_enabled_content_addon(&state, query.addon_id, ContentType::Manga).await?;
+    let cache_key = format!("manga:{id}");
     if let Some(cached) = read_cache::<AnimeMetadata>(&state, addon.id, &cache_key).await? {
         return Ok(Json(cached));
     }
@@ -1135,6 +1223,35 @@ async fn select_enabled_addon(
         .into_iter()
         .find(|addon| addon.enabled)
         .ok_or_else(|| ApiFailure::not_found("no enabled addon registered"))
+}
+
+async fn select_enabled_content_addon(
+    state: &AppState,
+    addon_id: Option<Uuid>,
+    content_type: ContentType,
+) -> Result<AddonRegistration, ApiFailure> {
+    let addons = list_all_addons(state).await?;
+    if let Some(addon_id) = addon_id {
+        return addons
+            .into_iter()
+            .find(|addon| addon.enabled && addon.id == addon_id)
+            .filter(|addon| addon_supports_content_type(addon, content_type))
+            .ok_or_else(|| ApiFailure::not_found("enabled content addon not found"));
+    }
+
+    addons
+        .into_iter()
+        .find(|addon| addon.enabled && addon_supports_content_type(addon, content_type))
+        .ok_or_else(|| ApiFailure::not_found("no enabled content addon registered"))
+}
+
+fn addon_supports_content_type(addon: &AddonRegistration, content_type: ContentType) -> bool {
+    addon.manifest.as_ref().is_some_and(|manifest| {
+        manifest
+            .catalogs
+            .iter()
+            .any(|catalog| catalog.content_type == content_type)
+    })
 }
 
 fn parse_addon_id(addon_id: Option<&str>) -> Result<Option<Uuid>, ApiFailure> {
