@@ -80,6 +80,7 @@ cleanup() {
   stop_port_listener 8080
   stop_port_listener 8787
   stop_port_listener 8788
+  stop_port_listener 8789
 }
 
 load_env
@@ -88,6 +89,7 @@ if [[ "$RESTART" == true ]]; then
   stop_port_listener 8080
   stop_port_listener 8787
   stop_port_listener 8788
+  stop_port_listener 8789
 fi
 
 if [[ -z "${MAL_CLIENT_ID:-}" ]]; then
@@ -108,6 +110,11 @@ PORT=8788 start_service \
   "$WORKSPACE_DIR/typenx-addon-anilist" \
   npm run dev
 
+PORT=8789 start_service \
+  "typenx-addon-kitsu" \
+  "$WORKSPACE_DIR/typenx-addon-kitsu" \
+  npm run dev
+
 start_service \
   "typenx-server" \
   "$CORE_DIR" \
@@ -118,6 +125,7 @@ echo "Typenx backend stack is starting:"
 echo "  Core:        http://127.0.0.1:8080/health"
 echo "  MAL addon:   http://127.0.0.1:8787/manifest"
 echo "  AniList:     http://127.0.0.1:8788/manifest"
+echo "  Kitsu:       http://127.0.0.1:8789/manifest"
 echo ""
 echo "Logs are in $LOG_DIR"
 echo "Press Ctrl+C to stop the backend stack."

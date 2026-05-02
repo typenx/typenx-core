@@ -101,7 +101,7 @@ function Start-ServiceProcess {
 Import-DotEnv -Path $EnvPath
 
 if ($Restart) {
-    8080, 8787, 8788 | ForEach-Object { Stop-PortListener -Port $_ }
+    8080, 8787, 8788, 8789 | ForEach-Object { Stop-PortListener -Port $_ }
 }
 
 if (-not $env:MAL_CLIENT_ID) {
@@ -126,6 +126,13 @@ try {
         -Environment @{ PORT = "8788" }
 
     $services += Start-ServiceProcess `
+        -Name "typenx-addon-kitsu" `
+        -WorkingDirectory (Join-Path $WorkspaceDir "typenx-addon-kitsu") `
+        -FilePath "npm.cmd" `
+        -ArgumentList @("run", "dev") `
+        -Environment @{ PORT = "8789" }
+
+    $services += Start-ServiceProcess `
         -Name "typenx-server" `
         -WorkingDirectory $CoreDir `
         -FilePath "cargo" `
@@ -136,6 +143,7 @@ try {
     Write-Host "  Core:        http://127.0.0.1:8080/health"
     Write-Host "  MAL addon:   http://127.0.0.1:8787/manifest"
     Write-Host "  AniList:     http://127.0.0.1:8788/manifest"
+    Write-Host "  Kitsu:       http://127.0.0.1:8789/manifest"
     Write-Host ""
     Write-Host "Logs are in $LogDir"
     Write-Host "Press Ctrl+C to stop the backend stack."
@@ -164,5 +172,5 @@ finally {
         }
     }
     Start-Sleep -Milliseconds 500
-    8080, 8787, 8788 | ForEach-Object { Stop-PortListener -Port $_ }
+    8080, 8787, 8788, 8789 | ForEach-Object { Stop-PortListener -Port $_ }
 }

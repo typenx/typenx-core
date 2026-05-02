@@ -41,5 +41,6 @@ This loads `core\.env`, starts:
 - Typenx Core on `http://127.0.0.1:8080`
 - MyAnimeList addon on `http://127.0.0.1:8787`
 - AniList addon on `http://127.0.0.1:8788`
+- Kitsu addon on `http://127.0.0.1:8789`
 
 Use `Ctrl+C` in that PowerShell window to stop the stack.
