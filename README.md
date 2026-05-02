@@ -13,8 +13,9 @@ identity linking, list/progress sync, and remote metadata addons.
 
 ## V1 boundaries
 
-Typenx Core does not host anime files and does not return direct playback URLs. Remote addons return
-metadata, catalogs, search results, and episode metadata only.
+Typenx Core does not host anime files. Remote addons can return metadata, catalogs, search
+results, episode metadata, and, when they explicitly opt into `video_sources`, episode stream
+URLs controlled by the addon operator.
 
 ## Quick start
 
@@ -42,6 +43,7 @@ This loads `core\.env`, starts:
 - MyAnimeList addon on `http://127.0.0.1:8787`
 - AniList addon on `http://127.0.0.1:8788`
 - Kitsu addon on `http://127.0.0.1:8789`
+- Video library addon on `http://127.0.0.1:8791`
 
 Use `Ctrl+C` in that PowerShell window to stop the stack.
 

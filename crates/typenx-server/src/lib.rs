@@ -15,6 +15,7 @@ use tower_http::{
 };
 use typenx_addon_sdk_schema::{
     AddonManifest, AnimeMetadata, CatalogRequest, CatalogResponse, SearchRequest,
+    VideoSourceRequest, VideoSourceResponse,
 };
 use typenx_core::{
     addons::{
@@ -195,6 +196,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/catalogs", post(catalogs))
         .route("/search", post(search))
         .route("/anime/{id}", get(anime_meta))
+        .route("/videos", post(video_sources))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -257,7 +259,8 @@ fn origin_from_url(url: &str) -> Option<String> {
         addon_manifest,
         catalogs,
         search,
-        anime_meta
+        anime_meta,
+        video_sources
     ),
     components(schemas(
         ApiError,
@@ -279,7 +282,9 @@ fn origin_from_url(url: &str) -> Option<String> {
         CatalogRequest,
         SearchRequest,
         CatalogResponse,
-        AnimeMetadata
+        AnimeMetadata,
+        VideoSourceRequest,
+        VideoSourceResponse
     ))
 )]
 pub struct ApiDoc;
@@ -715,6 +720,43 @@ async fn anime_meta(
     }
     let response = state.addon_client.anime_meta(&addon.base_url, &id).await?;
     write_cache(&state, addon.id, cache_key, &response).await?;
+    Ok(Json(response))
+}
+
+#[utoipa::path(
+    post,
+    path = "/videos",
+    request_body = VideoSourceRequest,
+    responses((status = 200, body = VideoSourceResponse))
+)]
+async fn video_sources(
+    State(state): State<AppState>,
+    Json(request): Json<VideoSourceRequest>,
+) -> Result<Json<VideoSourceResponse>, ApiFailure> {
+    if request.episode_id.is_none() && request.episode_number.is_none() {
+        return Err(ApiFailure::bad_request(
+            "episode_id or episode_number is required",
+        ));
+    }
+
+    let addon = select_enabled_addon(&state, parse_addon_id(request.addon_id.as_deref())?).await?;
+    if !addon.manifest.as_ref().is_some_and(|manifest| {
+        manifest.resources.iter().any(|resource| {
+            matches!(
+                resource,
+                typenx_addon_sdk_schema::AddonResource::VideoSources
+            )
+        })
+    }) {
+        return Err(ApiFailure::bad_request(
+            "selected addon does not provide video sources",
+        ));
+    }
+
+    let response = state
+        .addon_client
+        .video_sources(&addon.base_url, &request)
+        .await?;
     Ok(Json(response))
 }
 

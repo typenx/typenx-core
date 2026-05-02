@@ -20,6 +20,7 @@ pub enum AddonResource {
     Search,
     AnimeMeta,
     EpisodeMeta,
+    VideoSources,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
@@ -61,6 +62,48 @@ pub struct SearchRequest {
     pub addon_id: Option<String>,
     pub query: String,
     pub limit: Option<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+pub struct VideoSourceRequest {
+    pub addon_id: Option<String>,
+    pub anime_id: String,
+    pub episode_id: Option<String>,
+    pub episode_number: Option<u32>,
+    pub season_number: Option<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+pub struct VideoSourceResponse {
+    pub streams: Vec<VideoStream>,
+    #[serde(default)]
+    pub subtitles: Vec<VideoSubtitle>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+pub struct VideoStream {
+    pub id: String,
+    pub title: Option<String>,
+    pub url: String,
+    pub quality: Option<String>,
+    pub format: Option<String>,
+    pub audio_language: Option<String>,
+    pub headers: Vec<VideoHeader>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+pub struct VideoHeader {
+    pub name: String,
+    pub value: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+pub struct VideoSubtitle {
+    pub id: String,
+    pub label: String,
+    pub language: Option<String>,
+    pub url: String,
+    pub format: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq)]
@@ -183,7 +226,12 @@ mod tests {
             version: "0.1.0".to_owned(),
             description: None,
             icon: Some("https://typenx.dev/addon-icon.png".to_owned()),
-            resources: vec![AddonResource::Catalog, AddonResource::Search],
+            resources: vec![
+                AddonResource::Catalog,
+                AddonResource::Search,
+                AddonResource::AnimeMeta,
+                AddonResource::VideoSources,
+            ],
             catalogs: vec![CatalogDefinition {
                 id: "popular".to_owned(),
                 name: "Popular".to_owned(),
@@ -194,7 +242,8 @@ mod tests {
 
         let json = serde_json::to_string(&manifest).unwrap();
         assert!(json.contains("\"catalog\""));
-        assert!(json.contains("\"anime\""));
+        assert!(json.contains("\"anime_meta\""));
+        assert!(json.contains("\"video_sources\""));
     }
 
     #[test]
@@ -223,5 +272,34 @@ mod tests {
         let roundtrip: AnimePreview = serde_json::from_str(&json).unwrap();
         assert_eq!(roundtrip.genres, vec!["Action", "Drama"]);
         assert_eq!(roundtrip.season_entries[0].season_number, Some(2));
+    }
+
+    #[test]
+    fn video_sources_serialize_protocol_shape() {
+        let response = VideoSourceResponse {
+            streams: vec![VideoStream {
+                id: "main-1080p".to_owned(),
+                title: Some("Main".to_owned()),
+                url: "https://cdn.example/anime/episode-1.m3u8".to_owned(),
+                quality: Some("1080p".to_owned()),
+                format: Some("hls".to_owned()),
+                audio_language: Some("ja".to_owned()),
+                headers: vec![VideoHeader {
+                    name: "referer".to_owned(),
+                    value: "https://example.test".to_owned(),
+                }],
+            }],
+            subtitles: vec![VideoSubtitle {
+                id: "en".to_owned(),
+                label: "English".to_owned(),
+                language: Some("en".to_owned()),
+                url: "https://cdn.example/subs/en.vtt".to_owned(),
+                format: Some("vtt".to_owned()),
+            }],
+        };
+
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("\"streams\""));
+        assert!(json.contains("\"subtitles\""));
     }
 }

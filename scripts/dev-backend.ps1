@@ -12,6 +12,7 @@ $AddonRepos = @{
     "typenx-addon-myanimelist" = "https://github.com/typenx/typenx-addon-myanimelist.git"
     "typenx-addon-anilist" = "https://github.com/typenx/typenx-addon-anilist.git"
     "typenx-addon-kitsu" = "https://github.com/typenx/typenx-addon-kitsu.git"
+    "typenx-addon-video-library" = "https://github.com/typenx/typenx-addon-video-library.git"
 }
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
@@ -169,7 +170,7 @@ function Start-ServiceProcess {
 Import-DotEnv -Path $EnvPath
 
 if ($Restart) {
-    8080, 8787, 8788, 8789 | ForEach-Object { Stop-PortListener -Port $_ }
+    8080, 8787, 8788, 8789, 8791 | ForEach-Object { Stop-PortListener -Port $_ }
 }
 
 if (-not $env:MAL_CLIENT_ID) {
@@ -182,6 +183,7 @@ try {
     $myAnimeListAddonDir = Ensure-AddonDirectory -Name "typenx-addon-myanimelist"
     $aniListAddonDir = Ensure-AddonDirectory -Name "typenx-addon-anilist"
     $kitsuAddonDir = Ensure-AddonDirectory -Name "typenx-addon-kitsu"
+    $videoLibraryAddonDir = Ensure-AddonDirectory -Name "typenx-addon-video-library"
 
     $services += Start-ServiceProcess `
         -Name "typenx-addon-myanimelist" `
@@ -205,6 +207,13 @@ try {
         -Environment @{ PORT = "8789" }
 
     $services += Start-ServiceProcess `
+        -Name "typenx-addon-video-library" `
+        -WorkingDirectory $videoLibraryAddonDir `
+        -FilePath "npm.cmd" `
+        -ArgumentList @("run", "dev") `
+        -Environment @{ PORT = "8791" }
+
+    $services += Start-ServiceProcess `
         -Name "typenx-server" `
         -WorkingDirectory $CoreDir `
         -FilePath "cargo" `
@@ -216,6 +225,7 @@ try {
     Write-Host "  MAL addon:   http://127.0.0.1:8787/manifest"
     Write-Host "  AniList:     http://127.0.0.1:8788/manifest"
     Write-Host "  Kitsu:       http://127.0.0.1:8789/manifest"
+    Write-Host "  Video lib:   http://127.0.0.1:8791/manifest"
     Write-Host ""
     Write-Host "Logs are in $LogDir"
     Write-Host "Press Ctrl+C to stop the backend stack."
@@ -244,5 +254,5 @@ finally {
         }
     }
     Start-Sleep -Milliseconds 500
-    8080, 8787, 8788, 8789 | ForEach-Object { Stop-PortListener -Port $_ }
+    8080, 8787, 8788, 8789, 8791 | ForEach-Object { Stop-PortListener -Port $_ }
 }
