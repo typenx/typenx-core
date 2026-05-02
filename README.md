@@ -23,3 +23,17 @@ cargo run -p typenx-server
 ```
 
 For local configuration, copy `.env.example` to `.env` and fill in the OAuth credentials.
+
+To run the full local backend stack, including the official MAL and AniList addon services:
+
+```powershell
+.\scripts\dev-backend.ps1 -Restart
+```
+
+This loads `core\.env`, starts:
+
+- Typenx Core on `http://127.0.0.1:8080`
+- MyAnimeList addon on `http://127.0.0.1:8787`
+- AniList addon on `http://127.0.0.1:8788`
+
+Use `Ctrl+C` in that PowerShell window to stop the stack.
