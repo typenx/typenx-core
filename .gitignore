@@ -1,5 +1,6 @@
 /target
 /.env
+/.venv-ml
 *.db
 *.sqlite
 *.sqlite3

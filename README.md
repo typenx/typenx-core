@@ -91,3 +91,15 @@ Roadmap toward a heavier ML model:
 3. Blend collaborative candidates with the current content model for cold start and explanation quality.
 4. Add contextual bandit exploration so Typenx learns without overfitting users into a narrow bubble.
 5. Evaluate with retention, completion rate, dislike avoidance, novelty, diversity, and calibration metrics.
+
+### Local GPU Smoke Test
+
+On Windows AMD GPUs, Typenx uses PyTorch DirectML for local recommender experiments:
+
+```powershell
+python -m venv .venv-ml
+.\.venv-ml\Scripts\python.exe -m pip install -r scripts\requirements-ml.txt
+.\.venv-ml\Scripts\python.exe scripts\recommendation_gpu_smoke.py
+```
+
+The script trains a compact implicit-feedback matrix factorization model and reports the active backend. Pass `--cpu` to compare CPU behavior.
