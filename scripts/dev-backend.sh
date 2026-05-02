@@ -20,6 +20,7 @@ addon_repo_url() {
     typenx-addon-anilist) echo "https://github.com/typenx/typenx-addon-anilist.git" ;;
     typenx-addon-kitsu) echo "https://github.com/typenx/typenx-addon-kitsu.git" ;;
     typenx-addon-video-library) echo "https://github.com/typenx/typenx-addon-video-library.git" ;;
+    typenx-addon-nxvideo) echo "https://github.com/typenx/typenx-addon-nxvideo.git" ;;
     *) return 1 ;;
   esac
 }
@@ -132,6 +133,7 @@ cleanup() {
   stop_port_listener 8788
   stop_port_listener 8789
   stop_port_listener 8791
+  stop_port_listener 8792
 }
 
 load_env
@@ -142,6 +144,7 @@ if [[ "$RESTART" == true ]]; then
   stop_port_listener 8788
   stop_port_listener 8789
   stop_port_listener 8791
+  stop_port_listener 8792
 fi
 
 if [[ -z "${MAL_CLIENT_ID:-}" ]]; then
@@ -156,6 +159,7 @@ MYANIMELIST_ADDON_DIR="$(ensure_addon_dir "typenx-addon-myanimelist")"
 ANILIST_ADDON_DIR="$(ensure_addon_dir "typenx-addon-anilist")"
 KITSU_ADDON_DIR="$(ensure_addon_dir "typenx-addon-kitsu")"
 VIDEO_LIBRARY_ADDON_DIR="$(ensure_addon_dir "typenx-addon-video-library")"
+NXVIDEO_ADDON_DIR="$(ensure_addon_dir "typenx-addon-nxvideo")"
 
 PORT=8787 start_service \
   "typenx-addon-myanimelist" \
@@ -177,6 +181,11 @@ PORT=8791 start_service \
   "$VIDEO_LIBRARY_ADDON_DIR" \
   npm run dev
 
+PORT=8792 start_service \
+  "typenx-addon-nxvideo" \
+  "$NXVIDEO_ADDON_DIR" \
+  npm run dev
+
 start_service \
   "typenx-server" \
   "$CORE_DIR" \
@@ -189,6 +198,7 @@ echo "  MAL addon:   http://127.0.0.1:8787/manifest"
 echo "  AniList:     http://127.0.0.1:8788/manifest"
 echo "  Kitsu:       http://127.0.0.1:8789/manifest"
 echo "  Video lib:   http://127.0.0.1:8791/manifest"
+echo "  NXVideo:     http://127.0.0.1:8792/manifest"
 echo ""
 echo "Logs are in $LOG_DIR"
 echo "Press Ctrl+C to stop the backend stack."

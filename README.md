@@ -44,6 +44,7 @@ This loads `core\.env`, starts:
 - AniList addon on `http://127.0.0.1:8788`
 - Kitsu addon on `http://127.0.0.1:8789`
 - Video library addon on `http://127.0.0.1:8791`
+- NXVideo addon on `http://127.0.0.1:8792`
 
 Use `Ctrl+C` in that PowerShell window to stop the stack.
 
