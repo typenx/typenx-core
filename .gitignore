@@ -1,6 +1,7 @@
 /target
 /.env
 /.venv-ml
+__pycache__/
 *.db
 *.sqlite
 *.sqlite3
