@@ -21,6 +21,8 @@ addon_repo_url() {
     typenx-addon-kitsu) echo "https://github.com/typenx/typenx-addon-kitsu.git" ;;
     typenx-addon-video-library) echo "https://github.com/typenx/typenx-addon-video-library.git" ;;
     typenx-addon-nxvideo) echo "https://github.com/typenx/typenx-addon-nxvideo.git" ;;
+    typenx-addon-plex) echo "https://github.com/typenx/typenx-addon-plex.git" ;;
+    typenx-addon-jellyfin) echo "https://github.com/typenx/typenx-addon-jellyfin.git" ;;
     *) return 1 ;;
   esac
 }
@@ -134,6 +136,8 @@ cleanup() {
   stop_port_listener 8789
   stop_port_listener 8791
   stop_port_listener 8792
+  stop_port_listener 8793
+  stop_port_listener 8794
 }
 
 load_env
@@ -145,6 +149,8 @@ if [[ "$RESTART" == true ]]; then
   stop_port_listener 8789
   stop_port_listener 8791
   stop_port_listener 8792
+  stop_port_listener 8793
+  stop_port_listener 8794
 fi
 
 if [[ -z "${MAL_CLIENT_ID:-}" ]]; then
@@ -160,6 +166,8 @@ ANILIST_ADDON_DIR="$(ensure_addon_dir "typenx-addon-anilist")"
 KITSU_ADDON_DIR="$(ensure_addon_dir "typenx-addon-kitsu")"
 VIDEO_LIBRARY_ADDON_DIR="$(ensure_addon_dir "typenx-addon-video-library")"
 NXVIDEO_ADDON_DIR="$(ensure_addon_dir "typenx-addon-nxvideo")"
+PLEX_ADDON_DIR="$(ensure_addon_dir "typenx-addon-plex")"
+JELLYFIN_ADDON_DIR="$(ensure_addon_dir "typenx-addon-jellyfin")"
 
 PORT=8787 start_service \
   "typenx-addon-myanimelist" \
@@ -186,6 +194,16 @@ PORT=8792 start_service \
   "$NXVIDEO_ADDON_DIR" \
   npm run dev
 
+PORT=8793 start_service \
+  "typenx-addon-plex" \
+  "$PLEX_ADDON_DIR" \
+  npm run dev
+
+PORT=8794 start_service \
+  "typenx-addon-jellyfin" \
+  "$JELLYFIN_ADDON_DIR" \
+  npm run dev
+
 start_service \
   "typenx-server" \
   "$CORE_DIR" \
@@ -199,6 +217,8 @@ echo "  AniList:     http://127.0.0.1:8788/manifest"
 echo "  Kitsu:       http://127.0.0.1:8789/manifest"
 echo "  Video lib:   http://127.0.0.1:8791/manifest"
 echo "  NXVideo:     http://127.0.0.1:8792/manifest"
+echo "  Plex:        http://127.0.0.1:8793/manifest"
+echo "  Jellyfin:    http://127.0.0.1:8794/manifest"
 echo ""
 echo "Logs are in $LOG_DIR"
 echo "Press Ctrl+C to stop the backend stack."
