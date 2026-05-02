@@ -45,6 +45,8 @@ This loads `core\.env`, starts:
 - Kitsu addon on `http://127.0.0.1:8789`
 - Video library addon on `http://127.0.0.1:8791`
 - NXVideo addon on `http://127.0.0.1:8792`
+- Plex addon on `http://127.0.0.1:8793`
+- Jellyfin addon on `http://127.0.0.1:8794`
 
 Use `Ctrl+C` in that PowerShell window to stop the stack.
 

@@ -14,6 +14,8 @@ $AddonRepos = @{
     "typenx-addon-kitsu" = "https://github.com/typenx/typenx-addon-kitsu.git"
     "typenx-addon-video-library" = "https://github.com/typenx/typenx-addon-video-library.git"
     "typenx-addon-nxvideo" = "https://github.com/typenx/typenx-addon-nxvideo.git"
+    "typenx-addon-plex" = "https://github.com/typenx/typenx-addon-plex.git"
+    "typenx-addon-jellyfin" = "https://github.com/typenx/typenx-addon-jellyfin.git"
 }
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
@@ -171,7 +173,7 @@ function Start-ServiceProcess {
 Import-DotEnv -Path $EnvPath
 
 if ($Restart) {
-    8080, 8787, 8788, 8789, 8791, 8792 | ForEach-Object { Stop-PortListener -Port $_ }
+    8080, 8787, 8788, 8789, 8791, 8792, 8793, 8794 | ForEach-Object { Stop-PortListener -Port $_ }
 }
 
 if (-not $env:MAL_CLIENT_ID) {
@@ -186,6 +188,8 @@ try {
     $kitsuAddonDir = Ensure-AddonDirectory -Name "typenx-addon-kitsu"
     $videoLibraryAddonDir = Ensure-AddonDirectory -Name "typenx-addon-video-library"
     $nxVideoAddonDir = Ensure-AddonDirectory -Name "typenx-addon-nxvideo"
+    $plexAddonDir = Ensure-AddonDirectory -Name "typenx-addon-plex"
+    $jellyfinAddonDir = Ensure-AddonDirectory -Name "typenx-addon-jellyfin"
 
     $services += Start-ServiceProcess `
         -Name "typenx-addon-myanimelist" `
@@ -223,6 +227,20 @@ try {
         -Environment @{ PORT = "8792" }
 
     $services += Start-ServiceProcess `
+        -Name "typenx-addon-plex" `
+        -WorkingDirectory $plexAddonDir `
+        -FilePath "npm.cmd" `
+        -ArgumentList @("run", "dev") `
+        -Environment @{ PORT = "8793" }
+
+    $services += Start-ServiceProcess `
+        -Name "typenx-addon-jellyfin" `
+        -WorkingDirectory $jellyfinAddonDir `
+        -FilePath "npm.cmd" `
+        -ArgumentList @("run", "dev") `
+        -Environment @{ PORT = "8794" }
+
+    $services += Start-ServiceProcess `
         -Name "typenx-server" `
         -WorkingDirectory $CoreDir `
         -FilePath "cargo" `
@@ -236,6 +254,8 @@ try {
     Write-Host "  Kitsu:       http://127.0.0.1:8789/manifest"
     Write-Host "  Video lib:   http://127.0.0.1:8791/manifest"
     Write-Host "  NXVideo:     http://127.0.0.1:8792/manifest"
+    Write-Host "  Plex:        http://127.0.0.1:8793/manifest"
+    Write-Host "  Jellyfin:    http://127.0.0.1:8794/manifest"
     Write-Host ""
     Write-Host "Logs are in $LogDir"
     Write-Host "Press Ctrl+C to stop the backend stack."
@@ -264,5 +284,5 @@ finally {
         }
     }
     Start-Sleep -Milliseconds 500
-    8080, 8787, 8788, 8789, 8791, 8792 | ForEach-Object { Stop-PortListener -Port $_ }
+    8080, 8787, 8788, 8789, 8791, 8792, 8793, 8794 | ForEach-Object { Stop-PortListener -Port $_ }
 }
