@@ -21,6 +21,7 @@ pub enum AddonResource {
     AnimeMeta,
     EpisodeMeta,
     VideoSources,
+    Recommendations,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
@@ -111,6 +112,20 @@ pub struct VideoSubtitle {
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq)]
 pub struct CatalogResponse {
     pub items: Vec<AnimePreview>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq)]
+pub struct RecommendationResponse {
+    pub items: Vec<RecommendationItem>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq)]
+pub struct RecommendationItem {
+    #[serde(flatten)]
+    pub anime: AnimePreview,
+    pub recommendation_score: f32,
+    #[serde(default)]
+    pub reasons: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq)]

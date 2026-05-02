@@ -59,3 +59,35 @@ TYPENX_DATABASE_URL=postgres://typenx:typenx@127.0.0.1:5432/typenx
 TYPENX_DATABASE_URL=mysql://typenx:typenx@127.0.0.1:3306/typenx
 TYPENX_DATABASE_URL=mongodb://127.0.0.1:27017/typenx
 ```
+
+## Typenx Recommendations
+
+Typenx owns recommendations centrally. MAL, AniList, and Kitsu are treated as imported signal and metadata providers, not as the recommendation brain.
+
+`POST /me/recommendations` reads the signed-in user's synced library and watch progress, then builds a taste profile from:
+
+- Provider list scores and statuses from AniList/MyAnimeList OAuth sync.
+- Dropped, paused, completed, watching, and planning states.
+- Watch progress and episode completion inside Typenx.
+- Add-on metadata such as genres, tags, studios, source, media type, score, and era.
+
+The first model is an explainable hybrid recommender. It creates weighted positive and negative features, gathers candidates from enabled metadata add-ons, enriches top candidates with metadata, ranks them, and applies diversity pressure so the feed does not collapse into repetitive clones.
+
+Request:
+
+```json
+{
+  "addon_id": "optional-addon-uuid",
+  "limit": 24,
+  "candidate_limit": 120,
+  "include_reasons": true
+}
+```
+
+Roadmap toward a heavier ML model:
+
+1. Store recommendation impressions, clicks, hides, completions, rewatches, and dwell time as training events.
+2. Train an implicit-feedback candidate generator using matrix factorization over Typenx user-item interactions.
+3. Blend collaborative candidates with the current content model for cold start and explanation quality.
+4. Add contextual bandit exploration so Typenx learns without overfitting users into a narrow bubble.
+5. Evaluate with retention, completion rate, dislike avoidance, novelty, diversity, and calibration metrics.

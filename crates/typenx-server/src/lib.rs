@@ -14,8 +14,8 @@ use tower_http::{
     trace::TraceLayer,
 };
 use typenx_addon_sdk_schema::{
-    AddonManifest, AnimeMetadata, CatalogRequest, CatalogResponse, SearchRequest,
-    VideoSourceRequest, VideoSourceResponse,
+    AddonManifest, AnimeMetadata, CatalogRequest, CatalogResponse, RecommendationResponse,
+    SearchRequest, VideoSourceRequest, VideoSourceResponse,
 };
 use typenx_core::{
     addons::{
@@ -26,6 +26,9 @@ use typenx_core::{
     providers::{
         new_mal_pkce_verifier, AniListClient, AnimeProviderClient, MyAnimeListClient,
         OAuthProviderConfig,
+    },
+    recommendations::{
+        default_candidate_requests, rank_recommendations, TasteProfile, TypenxRecommendationRequest,
     },
     security::{hash_token, protect_token, random_url_token},
 };
@@ -190,6 +193,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/me/providers", get(me_providers))
         .route("/me/library", get(me_library))
         .route("/me/progress", get(me_progress).post(upsert_me_progress))
+        .route("/me/recommendations", post(me_recommendations))
         .route("/addons", get(list_addons).post(register_addon))
         .route("/addons/{id}", delete(delete_addon))
         .route("/addons/{id}/manifest", get(addon_manifest))
@@ -253,6 +257,7 @@ fn origin_from_url(url: &str) -> Option<String> {
         me_library,
         me_progress,
         upsert_me_progress,
+        me_recommendations,
         list_addons,
         register_addon,
         delete_addon,
@@ -283,6 +288,8 @@ fn origin_from_url(url: &str) -> Option<String> {
         SearchRequest,
         CatalogResponse,
         AnimeMetadata,
+        TypenxRecommendationRequest,
+        RecommendationResponse,
         VideoSourceRequest,
         VideoSourceResponse
     ))
@@ -573,6 +580,86 @@ async fn upsert_me_progress(
         updated_at: Utc::now(),
     };
     Ok(Json(state.store.upsert_watch_progress(progress).await?))
+}
+
+#[utoipa::path(
+    post,
+    path = "/me/recommendations",
+    request_body = TypenxRecommendationRequest,
+    responses((status = 200, body = RecommendationResponse), (status = 401, body = ApiError))
+)]
+async fn me_recommendations(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<TypenxRecommendationRequest>,
+) -> Result<Json<RecommendationResponse>, ApiFailure> {
+    let (user, _) = current_user(&state, &headers).await?;
+    let library = state.store.list_library(user.id).await?;
+    let progress = state.store.list_watch_progress(user.id).await?;
+    let profile = TasteProfile::from_user_data(&library, &progress);
+    if profile.is_empty() {
+        return Ok(Json(RecommendationResponse { items: vec![] }));
+    }
+
+    let limit = request.limit.unwrap_or(24).clamp(1, 50);
+    let candidate_limit = request
+        .candidate_limit
+        .unwrap_or(limit * 5)
+        .clamp(limit, 200);
+    let addon = select_enabled_addon(&state, parse_addon_id(request.addon_id.as_deref())?).await?;
+    let per_catalog_limit = (candidate_limit / 4).max(limit).min(50);
+
+    let mut candidate_responses = Vec::new();
+    for mut candidate_request in
+        default_candidate_requests(per_catalog_limit, Some(addon.id.to_string()))
+    {
+        candidate_request.addon_id = Some(addon.id.to_string());
+        if let Ok(response) = state
+            .addon_client
+            .catalog(&addon.base_url, &candidate_request)
+            .await
+        {
+            candidate_responses.push(response);
+        }
+    }
+
+    let mut metadata = HashMap::new();
+    for candidate in candidate_responses
+        .iter()
+        .flat_map(|response| response.items.iter())
+        .take(40)
+    {
+        let cache_key = format!("anime:{}", candidate.id);
+        let meta = if let Some(cached) =
+            read_cache::<AnimeMetadata>(&state, addon.id, &cache_key).await?
+        {
+            Some(cached)
+        } else {
+            match state
+                .addon_client
+                .anime_meta(&addon.base_url, &candidate.id)
+                .await
+            {
+                Ok(response) => {
+                    write_cache(&state, addon.id, cache_key, &response).await?;
+                    Some(response)
+                }
+                Err(_) => None,
+            }
+        };
+        if let Some(meta) = meta {
+            metadata.insert(candidate.id.clone(), meta);
+        }
+    }
+
+    Ok(Json(rank_recommendations(
+        &profile,
+        &library,
+        candidate_responses,
+        &metadata,
+        limit,
+        request.include_reasons.unwrap_or(true),
+    )))
 }
 
 #[utoipa::path(get, path = "/addons", responses((status = 200, body = Vec<AddonRegistration>)))]
