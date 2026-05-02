@@ -1,7 +1,7 @@
 use std::{env, net::SocketAddr, sync::Arc};
 
 use typenx_server::{build_router, AppState};
-use typenx_storage::{SqlStore, TypenxStore};
+use typenx_storage::{DatabaseKind, MongoStore, SqlStore, TypenxStore};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -13,10 +13,15 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "127.0.0.1:8080".to_owned())
         .parse()?;
 
-    let store = SqlStore::connect(&database_url).await?;
+    let store: Arc<dyn TypenxStore> = match DatabaseKind::from_url(&database_url)? {
+        DatabaseKind::Mongo => Arc::new(MongoStore::connect(&database_url).await?),
+        DatabaseKind::Postgres | DatabaseKind::MySql | DatabaseKind::Sqlite => {
+            Arc::new(SqlStore::connect(&database_url).await?)
+        }
+    };
     store.migrate().await?;
 
-    let state = AppState::new(Arc::new(store));
+    let state = AppState::new(store);
     state
         .seed_default_addons()
         .await

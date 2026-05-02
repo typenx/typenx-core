@@ -1,4 +1,5 @@
 pub mod memory;
+pub mod mongo;
 pub mod sql;
 
 use async_trait::async_trait;
@@ -9,6 +10,7 @@ use typenx_core::{
 };
 use uuid::Uuid;
 
+pub use mongo::MongoStore;
 pub use sql::{DatabaseKind, SqlStore};
 
 #[async_trait]
@@ -76,6 +78,8 @@ pub trait TypenxStore: Send + Sync {
 pub enum StorageError {
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
+    #[error("mongodb error: {0}")]
+    Mongo(#[from] mongodb::error::Error),
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
     #[error("unsupported database url: {0}")]

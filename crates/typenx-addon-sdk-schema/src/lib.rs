@@ -78,6 +78,18 @@ pub struct AnimePreview {
     pub score: Option<f32>,
     pub year: Option<i32>,
     pub content_type: ContentType,
+    #[serde(default)]
+    pub season_entries: Vec<SeasonEntry>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+pub struct SeasonEntry {
+    pub id: String,
+    pub title: String,
+    pub season_number: Option<u32>,
+    pub year: Option<i32>,
+    pub episode_count: Option<u32>,
+    pub source: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq)]
@@ -181,5 +193,31 @@ mod tests {
         let json = serde_json::to_string(&manifest).unwrap();
         assert!(json.contains("\"catalog\""));
         assert!(json.contains("\"anime\""));
+    }
+
+    #[test]
+    fn anime_preview_preserves_season_entries() {
+        let preview = AnimePreview {
+            id: "central:aot".to_owned(),
+            title: "Attack on Titan".to_owned(),
+            poster: None,
+            banner: None,
+            synopsis: None,
+            score: None,
+            year: Some(2013),
+            content_type: ContentType::Anime,
+            season_entries: vec![SeasonEntry {
+                id: "aot-s2".to_owned(),
+                title: "Attack on Titan Season 2".to_owned(),
+                season_number: Some(2),
+                year: Some(2017),
+                episode_count: Some(12),
+                source: Some("Kitsu".to_owned()),
+            }],
+        };
+
+        let json = serde_json::to_string(&preview).unwrap();
+        let roundtrip: AnimePreview = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip.season_entries[0].season_number, Some(2));
     }
 }

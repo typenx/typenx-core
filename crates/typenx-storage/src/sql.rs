@@ -15,7 +15,7 @@ pub enum DatabaseKind {
     Postgres,
     MySql,
     Sqlite,
-    MongoFuture,
+    Mongo,
 }
 
 impl DatabaseKind {
@@ -27,7 +27,7 @@ impl DatabaseKind {
         } else if url.starts_with("sqlite://") {
             Ok(Self::Sqlite)
         } else if url.starts_with("mongodb://") || url.starts_with("mongodb+srv://") {
-            Ok(Self::MongoFuture)
+            Ok(Self::Mongo)
         } else {
             Err(StorageError::UnsupportedDatabaseUrl(url.to_owned()))
         }
@@ -43,9 +43,9 @@ pub struct SqlStore {
 impl SqlStore {
     pub async fn connect(database_url: &str) -> Result<Self, StorageError> {
         let kind = DatabaseKind::from_url(database_url)?;
-        if kind == DatabaseKind::MongoFuture {
+        if kind == DatabaseKind::Mongo {
             return Err(StorageError::UnsupportedDatabaseUrl(
-                "MongoDB is reserved for a future equal adapter".to_owned(),
+                "MongoDB URLs must be opened with MongoStore".to_owned(),
             ));
         }
         sqlx::any::install_default_drivers();
@@ -746,7 +746,7 @@ mod tests {
         );
         assert_eq!(
             DatabaseKind::from_url("mongodb://localhost/db").unwrap(),
-            DatabaseKind::MongoFuture
+            DatabaseKind::Mongo
         );
     }
 }

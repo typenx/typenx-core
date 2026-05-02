@@ -21,6 +21,7 @@ use typenx_core::{
         AddonRegistration, AddonSource, MetadataCacheEntry, RegisterAddonRequest, RemoteAddonClient,
     },
     auth::{AuthProvider, CurrentUser, LinkedProvider, LoginResult, OAuthState, Session, User},
+    library::WatchProgress,
     providers::{
         new_mal_pkce_verifier, AniListClient, AnimeProviderClient, MyAnimeListClient,
         OAuthProviderConfig,
@@ -187,7 +188,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/profile", get(profile))
         .route("/me/providers", get(me_providers))
         .route("/me/library", get(me_library))
-        .route("/me/progress", get(me_progress))
+        .route("/me/progress", get(me_progress).post(upsert_me_progress))
         .route("/addons", get(list_addons).post(register_addon))
         .route("/addons/{id}", delete(delete_addon))
         .route("/addons/{id}/manifest", get(addon_manifest))
@@ -249,6 +250,7 @@ fn origin_from_url(url: &str) -> Option<String> {
         me_providers,
         me_library,
         me_progress,
+        upsert_me_progress,
         list_addons,
         register_addon,
         delete_addon,
@@ -265,6 +267,8 @@ fn origin_from_url(url: &str) -> Option<String> {
         LoginResult,
         CurrentUser,
         ProviderAccount,
+        UpsertWatchProgressRequest,
+        WatchProgress,
         User,
         LinkedProvider,
         Session,
@@ -306,6 +310,16 @@ pub struct ProviderAccount {
     pub provider_username: String,
     pub expires_at: Option<chrono::DateTime<Utc>>,
     pub linked_at: chrono::DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize, Serialize, ToSchema)]
+pub struct UpsertWatchProgressRequest {
+    pub anime_id: String,
+    pub episode_id: Option<String>,
+    pub episode_number: Option<u32>,
+    pub position_seconds: u32,
+    pub duration_seconds: Option<u32>,
+    pub completed: bool,
 }
 
 impl From<LinkedProvider> for ProviderAccount {
@@ -528,6 +542,32 @@ async fn me_progress(
 ) -> Result<Json<Vec<typenx_core::library::WatchProgress>>, ApiFailure> {
     let (user, _) = current_user(&state, &headers).await?;
     Ok(Json(state.store.list_watch_progress(user.id).await?))
+}
+
+#[utoipa::path(
+    post,
+    path = "/me/progress",
+    request_body = UpsertWatchProgressRequest,
+    responses((status = 200, body = WatchProgress), (status = 401, body = ApiError))
+)]
+async fn upsert_me_progress(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<UpsertWatchProgressRequest>,
+) -> Result<Json<WatchProgress>, ApiFailure> {
+    let (user, _) = current_user(&state, &headers).await?;
+    let progress = WatchProgress {
+        id: Uuid::new_v4(),
+        user_id: user.id,
+        anime_id: request.anime_id,
+        episode_id: request.episode_id,
+        episode_number: request.episode_number,
+        position_seconds: request.position_seconds,
+        duration_seconds: request.duration_seconds,
+        completed: request.completed,
+        updated_at: Utc::now(),
+    };
+    Ok(Json(state.store.upsert_watch_progress(progress).await?))
 }
 
 #[utoipa::path(get, path = "/addons", responses((status = 200, body = Vec<AddonRegistration>)))]
@@ -968,7 +1008,10 @@ fn is_supported_metadata_addon(addon: &AddonRegistration) -> bool {
         && addon.manifest.as_ref().is_some_and(|manifest| {
             matches!(
                 manifest.id.as_str(),
-                "typenx-addon-anilist" | "typenx-addon-myanimelist" | "typenx-addon-kitsu"
+                "typenx-addon-season-centralizer"
+                    | "typenx-addon-anilist"
+                    | "typenx-addon-myanimelist"
+                    | "typenx-addon-kitsu"
             )
         })
 }
@@ -1315,7 +1358,7 @@ mod tests {
                 enabled: true,
                 source: AddonSource::User,
                 deletable: true,
-                manifest: Some(test_addon_manifest("typenx-addon-kitsu")),
+                manifest: Some(test_addon_manifest("typenx-addon-season-centralizer")),
                 created_at: Utc::now(),
                 updated_at: Utc::now(),
             })
