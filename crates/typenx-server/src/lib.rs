@@ -21,8 +21,8 @@ use typenx_core::{
     addons::{
         AddonRegistration, AddonSource, MetadataCacheEntry, RegisterAddonRequest, RemoteAddonClient,
     },
-    auth::{AuthProvider, CurrentUser, LinkedProvider, LoginResult, OAuthState, Session, User},
     auth::ProviderIdentity,
+    auth::{AuthProvider, CurrentUser, LinkedProvider, LoginResult, OAuthState, Session, User},
     library::{AnimeListEntry, ProviderListUpdate, WatchProgress, WatchStatus},
     providers::{
         new_mal_pkce_verifier, AniListClient, AnimeProviderClient, MyAnimeListClient,
@@ -643,7 +643,11 @@ async fn sync_progress_to_linked_providers(
         let Ok(identity) = provider_identity_from_linked(state, linked) else {
             continue;
         };
-        if client.update_list_entry(&identity, update.clone()).await.is_ok() {
+        if client
+            .update_list_entry(&identity, update.clone())
+            .await
+            .is_ok()
+        {
             let mut updated_entry = entry;
             updated_entry.status = update.status;
             if let Some(progress_episodes) = update.progress_episodes {
@@ -668,9 +672,9 @@ fn provider_entry_for_progress(
         .find(|entry| entry.provider == provider && entry.provider_anime_id == request.anime_id)
         .or_else(|| {
             let title = request.anime_title.as_deref().map(normalize_title)?;
-            library.iter().find(|entry| {
-                entry.provider == provider && normalize_title(&entry.title) == title
-            })
+            library
+                .iter()
+                .find(|entry| entry.provider == provider && normalize_title(&entry.title) == title)
         })
         .cloned()
 }
@@ -1016,7 +1020,7 @@ async fn manga_meta(
     if let Some(cached) = read_cache::<AnimeMetadata>(&state, addon.id, &cache_key).await? {
         return Ok(Json(cached));
     }
-    let response = state.addon_client.anime_meta(&addon.base_url, &id).await?;
+    let response = state.addon_client.manga_meta(&addon.base_url, &id).await?;
     write_cache(&state, addon.id, cache_key, &response).await?;
     Ok(Json(response))
 }

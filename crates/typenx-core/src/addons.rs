@@ -95,6 +95,15 @@ impl RemoteAddonClient {
         self.get_json(base_url, &path).await
     }
 
+    pub async fn manga_meta(
+        &self,
+        base_url: &str,
+        manga_id: &str,
+    ) -> Result<AnimeMetadata, AddonClientError> {
+        let path = format!("manga/{manga_id}");
+        self.get_json(base_url, &path).await
+    }
+
     pub async fn video_sources(
         &self,
         base_url: &str,
