@@ -30,6 +30,12 @@ To run the full local backend stack, including the official MAL and AniList addo
 .\scripts\dev-backend.ps1 -Restart
 ```
 
+Or from Bash/Git Bash:
+
+```bash
+./scripts/dev-backend.sh --restart
+```
+
 This loads `core\.env`, starts:
 
 - Typenx Core on `http://127.0.0.1:8080`
