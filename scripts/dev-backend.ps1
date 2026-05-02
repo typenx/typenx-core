@@ -8,6 +8,11 @@ $CoreDir = Resolve-Path (Join-Path $PSScriptRoot "..")
 $WorkspaceDir = Resolve-Path (Join-Path $CoreDir "..")
 $EnvPath = Join-Path $CoreDir ".env"
 $LogDir = Join-Path $CoreDir "target\dev-logs"
+$AddonRepos = @{
+    "typenx-addon-myanimelist" = "https://github.com/typenx/typenx-addon-myanimelist.git"
+    "typenx-addon-anilist" = "https://github.com/typenx/typenx-addon-anilist.git"
+    "typenx-addon-kitsu" = "https://github.com/typenx/typenx-addon-kitsu.git"
+}
 
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
@@ -62,6 +67,69 @@ function Stop-PortListener {
     }
 }
 
+function Find-AddonDirectory {
+    param([string]$Name)
+
+    $workspacePath = Join-Path $WorkspaceDir $Name
+    if (Test-Path $workspacePath) {
+        return (Resolve-Path $workspacePath).Path
+    }
+
+    $userProfile = [Environment]::GetFolderPath("UserProfile")
+    if (-not $userProfile) {
+        return $null
+    }
+
+    Write-Host "Searching $userProfile for $Name..."
+    $match = Get-ChildItem `
+        -Path $userProfile `
+        -Directory `
+        -Filter $Name `
+        -Recurse `
+        -Force `
+        -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+
+    if ($match) {
+        return $match.FullName
+    }
+
+    return $null
+}
+
+function Ensure-AddonDirectory {
+    param([string]$Name)
+
+    $addonDir = Find-AddonDirectory -Name $Name
+    if ($addonDir) {
+        Write-Host "Using $Name at $addonDir"
+    } else {
+        $repoUrl = $AddonRepos[$Name]
+        if (-not $repoUrl) {
+            throw "No clone URL configured for $Name."
+        }
+
+        $addonDir = Join-Path $WorkspaceDir $Name
+        Write-Host "$Name was not found under the user directory. Cloning $repoUrl to $addonDir..."
+        git clone $repoUrl $addonDir
+    }
+
+    $packageJson = Join-Path $addonDir "package.json"
+    $nodeModules = Join-Path $addonDir "node_modules"
+    if ((Test-Path $packageJson) -and -not (Test-Path $nodeModules)) {
+        Write-Host "Installing dependencies for $Name..."
+        Push-Location $addonDir
+        try {
+            npm install
+        }
+        finally {
+            Pop-Location
+        }
+    }
+
+    return $addonDir
+}
+
 function Start-ServiceProcess {
     param(
         [string]$Name,
@@ -111,23 +179,27 @@ if (-not $env:MAL_CLIENT_ID) {
 $services = @()
 
 try {
+    $myAnimeListAddonDir = Ensure-AddonDirectory -Name "typenx-addon-myanimelist"
+    $aniListAddonDir = Ensure-AddonDirectory -Name "typenx-addon-anilist"
+    $kitsuAddonDir = Ensure-AddonDirectory -Name "typenx-addon-kitsu"
+
     $services += Start-ServiceProcess `
         -Name "typenx-addon-myanimelist" `
-        -WorkingDirectory (Join-Path $WorkspaceDir "typenx-addon-myanimelist") `
+        -WorkingDirectory $myAnimeListAddonDir `
         -FilePath "npm.cmd" `
         -ArgumentList @("run", "dev") `
         -Environment @{ PORT = "8787" }
 
     $services += Start-ServiceProcess `
         -Name "typenx-addon-anilist" `
-        -WorkingDirectory (Join-Path $WorkspaceDir "typenx-addon-anilist") `
+        -WorkingDirectory $aniListAddonDir `
         -FilePath "npm.cmd" `
         -ArgumentList @("run", "dev") `
         -Environment @{ PORT = "8788" }
 
     $services += Start-ServiceProcess `
         -Name "typenx-addon-kitsu" `
-        -WorkingDirectory (Join-Path $WorkspaceDir "typenx-addon-kitsu") `
+        -WorkingDirectory $kitsuAddonDir `
         -FilePath "npm.cmd" `
         -ArgumentList @("run", "dev") `
         -Environment @{ PORT = "8789" }

@@ -14,6 +14,15 @@ LOG_DIR="$CORE_DIR/target/dev-logs"
 
 mkdir -p "$LOG_DIR"
 
+addon_repo_url() {
+  case "$1" in
+    typenx-addon-myanimelist) echo "https://github.com/typenx/typenx-addon-myanimelist.git" ;;
+    typenx-addon-anilist) echo "https://github.com/typenx/typenx-addon-anilist.git" ;;
+    typenx-addon-kitsu) echo "https://github.com/typenx/typenx-addon-kitsu.git" ;;
+    *) return 1 ;;
+  esac
+}
+
 load_env() {
   if [[ ! -f "$ENV_PATH" ]]; then
     echo "No .env found at $ENV_PATH. Continuing with existing shell environment." >&2
@@ -24,6 +33,46 @@ load_env() {
   # shellcheck disable=SC1090
   source "$ENV_PATH"
   set +a
+}
+
+find_addon_dir() {
+  local name="$1"
+  local workspace_path="$WORKSPACE_DIR/$name"
+  if [[ -d "$workspace_path" ]]; then
+    echo "$workspace_path"
+    return 0
+  fi
+
+  local user_home="${HOME:-}"
+  if [[ -z "$user_home" || ! -d "$user_home" ]]; then
+    return 1
+  fi
+
+  echo "Searching $user_home for $name..." >&2
+  find "$user_home" -type d -name "$name" -print -quit 2>/dev/null
+}
+
+ensure_addon_dir() {
+  local name="$1"
+  local addon_dir
+  addon_dir="$(find_addon_dir "$name")"
+
+  if [[ -n "$addon_dir" ]]; then
+    echo "Using $name at $addon_dir" >&2
+  else
+    local repo_url
+    repo_url="$(addon_repo_url "$name")"
+    addon_dir="$WORKSPACE_DIR/$name"
+    echo "$name was not found under the user directory. Cloning $repo_url to $addon_dir..." >&2
+    git clone "$repo_url" "$addon_dir"
+  fi
+
+  if [[ -f "$addon_dir/package.json" && ! -d "$addon_dir/node_modules" ]]; then
+    echo "Installing dependencies for $name..." >&2
+    (cd "$addon_dir" && npm install)
+  fi
+
+  echo "$addon_dir"
 }
 
 stop_port_listener() {
@@ -100,19 +149,23 @@ fi
 SERVICES=()
 trap cleanup EXIT INT TERM
 
+MYANIMELIST_ADDON_DIR="$(ensure_addon_dir "typenx-addon-myanimelist")"
+ANILIST_ADDON_DIR="$(ensure_addon_dir "typenx-addon-anilist")"
+KITSU_ADDON_DIR="$(ensure_addon_dir "typenx-addon-kitsu")"
+
 PORT=8787 start_service \
   "typenx-addon-myanimelist" \
-  "$WORKSPACE_DIR/typenx-addon-myanimelist" \
+  "$MYANIMELIST_ADDON_DIR" \
   npm run dev
 
 PORT=8788 start_service \
   "typenx-addon-anilist" \
-  "$WORKSPACE_DIR/typenx-addon-anilist" \
+  "$ANILIST_ADDON_DIR" \
   npm run dev
 
 PORT=8789 start_service \
   "typenx-addon-kitsu" \
-  "$WORKSPACE_DIR/typenx-addon-kitsu" \
+  "$KITSU_ADDON_DIR" \
   npm run dev
 
 start_service \
