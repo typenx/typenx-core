@@ -53,6 +53,7 @@ The script loads `core/.env` and starts:
 - NXVideo addon on `http://127.0.0.1:8792`
 - Plex addon on `http://127.0.0.1:8793`
 - Jellyfin addon on `http://127.0.0.1:8794`
+- NxManga addon on `http://127.0.0.1:8795`
 
 Use `Ctrl+C` in that PowerShell window to stop the stack.
 

@@ -14,6 +14,7 @@ $AddonRepos = @{
     "typenx-addon-kitsu" = "https://github.com/typenx/typenx-addon-kitsu.git"
     "typenx-addon-video-library" = "https://github.com/typenx/typenx-addon-video-library.git"
     "typenx-addon-nxvideo" = "https://github.com/typenx/typenx-addon-nxvideo.git"
+    "typenx-addon-nxmanga" = "https://github.com/typenx/typenx-addon-nxmanga.git"
     "typenx-addon-plex" = "https://github.com/typenx/typenx-addon-plex.git"
     "typenx-addon-jellyfin" = "https://github.com/typenx/typenx-addon-jellyfin.git"
 }
@@ -118,17 +119,9 @@ function Ensure-AddonDirectory {
         git clone $repoUrl $addonDir
     }
 
-    $packageJson = Join-Path $addonDir "package.json"
-    $nodeModules = Join-Path $addonDir "node_modules"
-    if ((Test-Path $packageJson) -and -not (Test-Path $nodeModules)) {
-        Write-Host "Installing dependencies for $Name..."
-        Push-Location $addonDir
-        try {
-            npm install
-        }
-        finally {
-            Pop-Location
-        }
+    $cargoToml = Join-Path $addonDir "Cargo.toml"
+    if (-not (Test-Path $cargoToml)) {
+        throw "$Name is expected to be a Rust addon, but Cargo.toml was not found at $addonDir."
     }
 
     return $addonDir
@@ -170,10 +163,32 @@ function Start-ServiceProcess {
     }
 }
 
+function Start-RustAddon {
+    param(
+        [string]$Name,
+        [string]$WorkingDirectory,
+        [string]$Port,
+        [hashtable]$Environment = @{}
+    )
+
+    $mergedEnvironment = @{}
+    foreach ($key in $Environment.Keys) {
+        $mergedEnvironment[$key] = $Environment[$key]
+    }
+    $mergedEnvironment["PORT"] = $Port
+
+    Start-ServiceProcess `
+        -Name $Name `
+        -WorkingDirectory $WorkingDirectory `
+        -FilePath "cargo" `
+        -ArgumentList @("run") `
+        -Environment $mergedEnvironment
+}
+
 Import-DotEnv -Path $EnvPath
 
 if ($Restart) {
-    8080, 8787, 8788, 8789, 8791, 8792, 8793, 8794 | ForEach-Object { Stop-PortListener -Port $_ }
+    8080, 8787, 8788, 8789, 8790, 8791, 8792, 8793, 8794, 8795 | ForEach-Object { Stop-PortListener -Port $_ }
 }
 
 if (-not $env:MAL_CLIENT_ID) {
@@ -188,57 +203,49 @@ try {
     $kitsuAddonDir = Ensure-AddonDirectory -Name "typenx-addon-kitsu"
     $videoLibraryAddonDir = Ensure-AddonDirectory -Name "typenx-addon-video-library"
     $nxVideoAddonDir = Ensure-AddonDirectory -Name "typenx-addon-nxvideo"
+    $nxMangaAddonDir = Ensure-AddonDirectory -Name "typenx-addon-nxmanga"
     $plexAddonDir = Ensure-AddonDirectory -Name "typenx-addon-plex"
     $jellyfinAddonDir = Ensure-AddonDirectory -Name "typenx-addon-jellyfin"
 
-    $services += Start-ServiceProcess `
+    $services += Start-RustAddon `
         -Name "typenx-addon-myanimelist" `
         -WorkingDirectory $myAnimeListAddonDir `
-        -FilePath "npm.cmd" `
-        -ArgumentList @("run", "dev") `
-        -Environment @{ PORT = "8787" }
+        -Port "8787"
 
-    $services += Start-ServiceProcess `
+    $services += Start-RustAddon `
         -Name "typenx-addon-anilist" `
         -WorkingDirectory $aniListAddonDir `
-        -FilePath "npm.cmd" `
-        -ArgumentList @("run", "dev") `
-        -Environment @{ PORT = "8788" }
+        -Port "8788"
 
-    $services += Start-ServiceProcess `
+    $services += Start-RustAddon `
         -Name "typenx-addon-kitsu" `
         -WorkingDirectory $kitsuAddonDir `
-        -FilePath "npm.cmd" `
-        -ArgumentList @("run", "dev") `
-        -Environment @{ PORT = "8789" }
+        -Port "8789"
 
-    $services += Start-ServiceProcess `
+    $services += Start-RustAddon `
         -Name "typenx-addon-video-library" `
         -WorkingDirectory $videoLibraryAddonDir `
-        -FilePath "npm.cmd" `
-        -ArgumentList @("run", "dev") `
-        -Environment @{ PORT = "8791" }
+        -Port "8791"
 
-    $services += Start-ServiceProcess `
+    $services += Start-RustAddon `
         -Name "typenx-addon-nxvideo" `
         -WorkingDirectory $nxVideoAddonDir `
-        -FilePath "npm.cmd" `
-        -ArgumentList @("run", "dev") `
-        -Environment @{ PORT = "8792" }
+        -Port "8792"
 
-    $services += Start-ServiceProcess `
+    $services += Start-RustAddon `
+        -Name "typenx-addon-nxmanga" `
+        -WorkingDirectory $nxMangaAddonDir `
+        -Port "8795"
+
+    $services += Start-RustAddon `
         -Name "typenx-addon-plex" `
         -WorkingDirectory $plexAddonDir `
-        -FilePath "npm.cmd" `
-        -ArgumentList @("run", "dev") `
-        -Environment @{ PORT = "8793" }
+        -Port "8793"
 
-    $services += Start-ServiceProcess `
+    $services += Start-RustAddon `
         -Name "typenx-addon-jellyfin" `
         -WorkingDirectory $jellyfinAddonDir `
-        -FilePath "npm.cmd" `
-        -ArgumentList @("run", "dev") `
-        -Environment @{ PORT = "8794" }
+        -Port "8794"
 
     $services += Start-ServiceProcess `
         -Name "typenx-server" `
@@ -256,6 +263,7 @@ try {
     Write-Host "  NXVideo:     http://127.0.0.1:8792/manifest"
     Write-Host "  Plex:        http://127.0.0.1:8793/manifest"
     Write-Host "  Jellyfin:    http://127.0.0.1:8794/manifest"
+    Write-Host "  NxManga:     http://127.0.0.1:8795/manifest"
     Write-Host ""
     Write-Host "Logs are in $LogDir"
     Write-Host "Press Ctrl+C to stop the backend stack."
@@ -284,5 +292,5 @@ finally {
         }
     }
     Start-Sleep -Milliseconds 500
-    8080, 8787, 8788, 8789, 8791, 8792, 8793, 8794 | ForEach-Object { Stop-PortListener -Port $_ }
+    8080, 8787, 8788, 8789, 8790, 8791, 8792, 8793, 8794, 8795 | ForEach-Object { Stop-PortListener -Port $_ }
 }
