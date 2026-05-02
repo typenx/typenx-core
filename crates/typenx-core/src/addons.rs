@@ -6,8 +6,8 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::addon_schema::{
-    AddonHealth, AddonManifest, AnimeMetadata, CatalogRequest, CatalogResponse, SearchRequest,
-    VideoSourceRequest, VideoSourceResponse,
+    AddonHealth, AddonManifest, AnimeMetadata, CatalogRequest, CatalogResponse, MangaPagesRequest,
+    MangaPagesResponse, SearchRequest, VideoSourceRequest, VideoSourceResponse,
 };
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
@@ -110,6 +110,14 @@ impl RemoteAddonClient {
         request: &VideoSourceRequest,
     ) -> Result<VideoSourceResponse, AddonClientError> {
         self.post_json(base_url, "videos", request).await
+    }
+
+    pub async fn manga_pages(
+        &self,
+        base_url: &str,
+        request: &MangaPagesRequest,
+    ) -> Result<MangaPagesResponse, AddonClientError> {
+        self.post_json(base_url, "manga/pages", request).await
     }
 
     async fn get_json<T>(&self, base_url: &str, path: &str) -> Result<T, AddonClientError>

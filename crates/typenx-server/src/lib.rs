@@ -14,8 +14,9 @@ use tower_http::{
     trace::TraceLayer,
 };
 use typenx_addon_sdk_schema::{
-    AddonManifest, AnimeMetadata, CatalogRequest, CatalogResponse, ContentType,
-    RecommendationResponse, SearchRequest, VideoSourceRequest, VideoSourceResponse,
+    AddonManifest, AnimeMetadata, CatalogRequest, CatalogResponse, ContentType, MangaPagesRequest,
+    MangaPagesResponse, RecommendationResponse, SearchRequest, VideoSourceRequest,
+    VideoSourceResponse,
 };
 use typenx_core::{
     addons::{
@@ -210,6 +211,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/manga/catalogs", post(manga_catalogs))
         .route("/manga/search", post(manga_search))
         .route("/manga/{id}", get(manga_meta))
+        .route("/manga/pages", post(manga_pages))
         .route("/videos", post(video_sources))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
@@ -278,6 +280,7 @@ fn origin_from_url(url: &str) -> Option<String> {
         manga_catalogs,
         manga_search,
         manga_meta,
+        manga_pages,
         video_sources
     ),
     components(schemas(
@@ -303,6 +306,8 @@ fn origin_from_url(url: &str) -> Option<String> {
         AnimeMetadata,
         TypenxRecommendationRequest,
         RecommendationResponse,
+        MangaPagesRequest,
+        MangaPagesResponse,
         VideoSourceRequest,
         VideoSourceResponse
     ))
@@ -1022,6 +1027,41 @@ async fn manga_meta(
     }
     let response = state.addon_client.manga_meta(&addon.base_url, &id).await?;
     write_cache(&state, addon.id, cache_key, &response).await?;
+    Ok(Json(response))
+}
+
+#[utoipa::path(
+    post,
+    path = "/manga/pages",
+    request_body = MangaPagesRequest,
+    responses((status = 200, body = MangaPagesResponse))
+)]
+async fn manga_pages(
+    State(state): State<AppState>,
+    Json(request): Json<MangaPagesRequest>,
+) -> Result<Json<MangaPagesResponse>, ApiFailure> {
+    if request.chapter_id.is_none() && request.chapter_number.is_none() {
+        return Err(ApiFailure::bad_request(
+            "chapter_id or chapter_number is required",
+        ));
+    }
+
+    let addon = select_enabled_addon(&state, parse_addon_id(request.addon_id.as_deref())?).await?;
+    if !addon.manifest.as_ref().is_some_and(|manifest| {
+        manifest
+            .resources
+            .iter()
+            .any(|resource| matches!(resource, typenx_addon_sdk_schema::AddonResource::MangaPages))
+    }) {
+        return Err(ApiFailure::bad_request(
+            "selected addon does not provide manga pages",
+        ));
+    }
+
+    let response = state
+        .addon_client
+        .manga_pages(&addon.base_url, &request)
+        .await?;
     Ok(Json(response))
 }
 

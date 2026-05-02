@@ -21,6 +21,7 @@ pub enum AddonResource {
     AnimeMeta,
     EpisodeMeta,
     VideoSources,
+    MangaPages,
     Recommendations,
 }
 
@@ -113,6 +114,35 @@ pub struct VideoSubtitle {
     pub language: Option<String>,
     pub url: String,
     pub format: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+pub struct MangaPagesRequest {
+    pub addon_id: Option<String>,
+    pub manga_id: String,
+    pub manga_title: Option<String>,
+    pub chapter_id: Option<String>,
+    pub chapter_number: Option<u32>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+pub struct MangaPagesResponse {
+    pub manga_id: String,
+    pub chapter_id: Option<String>,
+    pub chapter_number: Option<u32>,
+    #[serde(default)]
+    pub pages: Vec<MangaPageImage>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
+pub struct MangaPageImage {
+    pub index: u32,
+    pub url: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub mime_type: Option<String>,
+    #[serde(default)]
+    pub headers: Vec<VideoHeader>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, ToSchema, PartialEq)]
