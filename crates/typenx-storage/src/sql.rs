@@ -326,7 +326,7 @@ impl TypenxStore for SqlStore {
     async fn list_watch_progress(&self, user_id: Uuid) -> Result<Vec<WatchProgress>, StorageError> {
         let rows = sqlx::query(
             "SELECT id, user_id, anime_id, episode_id, episode_number, position_seconds,
-                    duration_seconds, completed, updated_at
+                    duration_seconds, CASE WHEN completed THEN 1 ELSE 0 END AS completed, updated_at
              FROM watch_progress WHERE user_id = ?",
         )
         .bind(user_id.to_string())
@@ -401,7 +401,15 @@ impl TypenxStore for SqlStore {
 
     async fn list_addons(&self) -> Result<Vec<AddonRegistration>, StorageError> {
         let rows = sqlx::query(
-            "SELECT id, base_url, enabled, source, deletable, manifest_json, created_at, updated_at FROM addons",
+            "SELECT id,
+                    base_url,
+                    CASE WHEN enabled THEN 1 ELSE 0 END AS enabled,
+                    source,
+                    CASE WHEN deletable THEN 1 ELSE 0 END AS deletable,
+                    manifest_json,
+                    created_at,
+                    updated_at
+             FROM addons",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -627,7 +635,7 @@ fn row_to_watch_progress(row: sqlx::any::AnyRow) -> Result<WatchProgress, Storag
         duration_seconds: row
             .try_get::<Option<i64>, _>("duration_seconds")?
             .map(|value| value as u32),
-        completed: row.try_get("completed")?,
+        completed: int_to_bool(row.try_get::<i64, _>("completed")?),
         updated_at: parse_datetime(row.try_get::<String, _>("updated_at")?)?,
     })
 }
@@ -637,9 +645,9 @@ fn row_to_addon(row: sqlx::any::AnyRow) -> Result<AddonRegistration, StorageErro
     Ok(AddonRegistration {
         id: parse_uuid(row.try_get::<String, _>("id")?)?,
         base_url: row.try_get("base_url")?,
-        enabled: row.try_get("enabled")?,
+        enabled: int_to_bool(row.try_get::<i64, _>("enabled")?),
         source: parse_addon_source(&row.try_get::<String, _>("source")?),
-        deletable: row.try_get("deletable")?,
+        deletable: int_to_bool(row.try_get::<i64, _>("deletable")?),
         manifest: manifest_json
             .map(|json| serde_json::from_str(&json))
             .transpose()?,
@@ -657,6 +665,10 @@ fn row_to_metadata_cache(row: sqlx::any::AnyRow) -> Result<MetadataCacheEntry, S
         expires_at: parse_datetime(row.try_get::<String, _>("expires_at")?)?,
         created_at: parse_datetime(row.try_get::<String, _>("created_at")?)?,
     })
+}
+
+fn int_to_bool(value: i64) -> bool {
+    value != 0
 }
 
 fn parse_uuid(value: String) -> Result<Uuid, StorageError> {
