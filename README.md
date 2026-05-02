@@ -1,8 +1,10 @@
 # Typenx Core
 
-Typenx Core is the Rust backend workspace for a self-hostable anime discovery and library platform.
-It is inspired by Stremio's reusable core architecture, but Typenx focuses on anime, MAL/AniList
-identity linking, list/progress sync, and remote metadata addons.
+Typenx Core is the Rust backend for a self-hostable anime discovery and library platform.
+
+It is built for people who want an open anime hub: provider login, metadata addons, season-aware discovery, recommendation experiments, and optional user-controlled video sources without locking the project to one website or service.
+
+If you like self-hosted media tools, anime discovery, or addon-first platforms, starring this repo helps more contributors find the project.
 
 ## Workspace
 
