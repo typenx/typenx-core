@@ -68,7 +68,9 @@ pub struct SearchRequest {
 pub struct VideoSourceRequest {
     pub addon_id: Option<String>,
     pub anime_id: String,
+    pub anime_title: Option<String>,
     pub episode_id: Option<String>,
+    pub episode_title: Option<String>,
     pub episode_number: Option<u32>,
     pub season_number: Option<u32>,
 }
