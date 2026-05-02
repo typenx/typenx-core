@@ -2,6 +2,7 @@
 /.env
 /.venv-ml
 __pycache__/
+recommendations.model.json
 *.db
 *.sqlite
 *.sqlite3

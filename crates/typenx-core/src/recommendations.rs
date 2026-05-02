@@ -1,4 +1,8 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::Path,
+};
 
 use serde::{Deserialize, Serialize};
 use typenx_addon_sdk_schema::{
@@ -15,6 +19,27 @@ pub struct TypenxRecommendationRequest {
     pub limit: Option<u32>,
     pub candidate_limit: Option<u32>,
     pub include_reasons: Option<bool>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct PrecomputedRecommendationArtifact {
+    pub version: u32,
+    pub generated_at: String,
+    pub backend: String,
+    pub users: HashMap<String, Vec<RecommendationItem>>,
+}
+
+pub fn read_precomputed_recommendations(
+    path: &Path,
+    user_id: &str,
+    limit: u32,
+) -> Option<RecommendationResponse> {
+    let artifact = fs::read_to_string(path)
+        .ok()
+        .and_then(|body| serde_json::from_str::<PrecomputedRecommendationArtifact>(&body).ok())?;
+    let mut items = artifact.users.get(user_id)?.clone();
+    items.truncate(limit as usize);
+    Some(RecommendationResponse { items })
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -346,6 +371,46 @@ mod tests {
                 .copied()
                 .unwrap_or_default()
                 < 0.0
+        );
+    }
+
+    #[test]
+    fn reads_precomputed_user_recommendations() {
+        let path = std::env::temp_dir().join(format!("typenx-rec-{}.json", Uuid::new_v4()));
+        std::fs::write(
+            &path,
+            r#"{
+              "version": 1,
+              "generated_at": "2026-05-02T00:00:00Z",
+              "backend": "directml",
+              "users": {
+                "user-1": [{
+                  "id": "anime-1",
+                  "title": "Test Anime",
+                  "poster": null,
+                  "banner": null,
+                  "synopsis": null,
+                  "score": null,
+                  "year": null,
+                  "content_type": "anime",
+                  "genres": [],
+                  "season_entries": [],
+                  "recommendation_score": 0.91,
+                  "reasons": ["gpu trained implicit feedback"]
+                }]
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let response = read_precomputed_recommendations(&path, "user-1", 10).unwrap();
+        std::fs::remove_file(path).unwrap();
+
+        assert_eq!(response.items.len(), 1);
+        assert_eq!(response.items[0].anime.title, "Test Anime");
+        assert_eq!(
+            response.items[0].reasons,
+            vec!["gpu trained implicit feedback"]
         );
     }
 }

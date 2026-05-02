@@ -1,4 +1,4 @@
-use std::{collections::HashMap, env, sync::Arc};
+use std::{collections::HashMap, env, path::PathBuf, sync::Arc};
 
 use axum::{
     extract::{Path, Query, State},
@@ -28,7 +28,8 @@ use typenx_core::{
         OAuthProviderConfig,
     },
     recommendations::{
-        default_candidate_requests, rank_recommendations, TasteProfile, TypenxRecommendationRequest,
+        default_candidate_requests, rank_recommendations, read_precomputed_recommendations,
+        TasteProfile, TypenxRecommendationRequest,
     },
     security::{hash_token, protect_token, random_url_token},
 };
@@ -47,6 +48,7 @@ pub struct AppConfig {
     pub guest_auth_enabled: bool,
     pub built_in_addons: Vec<String>,
     pub default_addons: Vec<String>,
+    pub recommender_model_path: Option<PathBuf>,
 }
 
 impl AppConfig {
@@ -70,6 +72,10 @@ impl AppConfig {
             default_addons: env::var("TYPENX_DEFAULT_ADDONS")
                 .map(|value| parse_addon_url_list(&value))
                 .unwrap_or_default(),
+            recommender_model_path: env::var("TYPENX_RECOMMENDER_MODEL_PATH")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .map(PathBuf::from),
         }
     }
 
@@ -602,6 +608,13 @@ async fn me_recommendations(
     }
 
     let limit = request.limit.unwrap_or(24).clamp(1, 50);
+    if let Some(path) = &state.config.recommender_model_path {
+        if let Some(response) = read_precomputed_recommendations(path, &user.id.to_string(), limit)
+        {
+            return Ok(Json(response));
+        }
+    }
+
     let candidate_limit = request
         .candidate_limit
         .unwrap_or(limit * 5)
@@ -1521,6 +1534,7 @@ mod tests {
                 guest_auth_enabled: true,
                 built_in_addons: vec![],
                 default_addons: vec!["http://127.0.0.1:65535".to_owned()],
+                recommender_model_path: None,
             },
         );
 
@@ -1661,6 +1675,7 @@ mod tests {
                 guest_auth_enabled: true,
                 built_in_addons: vec![],
                 default_addons: vec![],
+                recommender_model_path: None,
             },
         )
     }

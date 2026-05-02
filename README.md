@@ -103,3 +103,19 @@ python -m venv .venv-ml
 ```
 
 The script trains a compact implicit-feedback matrix factorization model and reports the active backend. Pass `--cpu` to compare CPU behavior.
+
+### Production GPU Training
+
+Train the artifact consumed by `POST /me/recommendations`:
+
+```powershell
+.\.venv-ml\Scripts\python.exe scripts\train_recommendation_model.py --database typenx.sqlite --output recommendations.model.json
+```
+
+Then point the server at it:
+
+```env
+TYPENX_RECOMMENDER_MODEL_PATH=recommendations.model.json
+```
+
+When the artifact contains the signed-in user, Typenx serves the GPU-trained recommendations directly. If the user is not in the artifact yet, the server falls back to the live hybrid ranker.
