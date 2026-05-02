@@ -7,6 +7,7 @@ use axum::{
     routing::{delete, get, post},
     Router,
 };
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use tower_http::{
@@ -14,9 +15,9 @@ use tower_http::{
     trace::TraceLayer,
 };
 use typenx_addon_sdk_schema::{
-    AddonManifest, AnimeMetadata, CatalogRequest, CatalogResponse, ContentType, MangaPagesRequest,
-    MangaPagesResponse, RecommendationResponse, SearchRequest, VideoSourceRequest,
-    VideoSourceResponse,
+    AddonManifest, AnimeMetadata, CatalogRequest, CatalogResponse, ContentType, MangaPageImage,
+    MangaPagesRequest, MangaPagesResponse, RecommendationResponse, SearchRequest, VideoHeader,
+    VideoSourceRequest, VideoSourceResponse,
 };
 use typenx_core::{
     addons::{
@@ -212,6 +213,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/manga/search", post(manga_search))
         .route("/manga/{id}", get(manga_meta))
         .route("/manga/pages", post(manga_pages))
+        .route("/manga/page-image", get(manga_page_image))
         .route("/videos", post(video_sources))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
@@ -281,6 +283,7 @@ fn origin_from_url(url: &str) -> Option<String> {
         manga_search,
         manga_meta,
         manga_pages,
+        manga_page_image,
         video_sources
     ),
     components(schemas(
@@ -1062,7 +1065,77 @@ async fn manga_pages(
         .addon_client
         .manga_pages(&addon.base_url, &request)
         .await?;
-    Ok(Json(response))
+    Ok(Json(proxy_manga_pages(&state, response)?))
+}
+
+#[utoipa::path(
+    get,
+    path = "/manga/page-image",
+    params(MangaPageImageProxyQuery),
+    responses((status = 200, description = "Manga page image bytes"))
+)]
+async fn manga_page_image(
+    State(state): State<AppState>,
+    Query(query): Query<MangaPageImageProxyQuery>,
+) -> Result<Response, ApiFailure> {
+    let signature = hash_token(&state.config.session_secret, &query.payload);
+    if signature != query.sig {
+        return Err(ApiFailure::unauthorized(
+            "invalid manga image proxy signature",
+        ));
+    }
+
+    let payload_bytes = URL_SAFE_NO_PAD
+        .decode(query.payload.as_bytes())
+        .map_err(|_| ApiFailure::bad_request("invalid manga image proxy payload"))?;
+    let payload: MangaPageImageProxyPayload = serde_json::from_slice(&payload_bytes)
+        .map_err(|_| ApiFailure::bad_request("invalid manga image proxy payload"))?;
+
+    let url = reqwest::Url::parse(&payload.url)
+        .map_err(|_| ApiFailure::bad_request("invalid manga image url"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(ApiFailure::bad_request(
+            "manga image url must use http or https",
+        ));
+    }
+
+    let client = reqwest::Client::new();
+    let mut request = client.get(url);
+    for header in payload.headers {
+        if is_safe_proxy_header(&header.name) {
+            let name = reqwest::header::HeaderName::from_bytes(header.name.as_bytes())
+                .map_err(|_| ApiFailure::bad_request("invalid manga image header"))?;
+            let value = reqwest::header::HeaderValue::from_str(&header.value)
+                .map_err(|_| ApiFailure::bad_request("invalid manga image header"))?;
+            request = request.header(name, value);
+        }
+    }
+
+    let upstream = request.send().await.map_err(ApiFailure::from)?;
+    let status = upstream.status();
+    if !status.is_success() {
+        return Err(ApiFailure {
+            status: StatusCode::BAD_GATEWAY,
+            message: format!("manga image source returned HTTP {status}"),
+        });
+    }
+
+    let content_type = upstream
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .cloned()
+        .unwrap_or_else(|| HeaderValue::from_static("application/octet-stream"));
+    let bytes = upstream.bytes().await.map_err(ApiFailure::from)?;
+
+    let mut response = bytes.to_vec().into_response();
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, content_type);
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=3600"),
+    );
+    Ok(response)
 }
 
 #[utoipa::path(
@@ -1361,6 +1434,56 @@ struct AddonSelectionQuery {
     addon_id: Option<Uuid>,
 }
 
+#[derive(Debug, Deserialize, IntoParams)]
+struct MangaPageImageProxyQuery {
+    payload: String,
+    sig: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct MangaPageImageProxyPayload {
+    url: String,
+    headers: Vec<VideoHeader>,
+}
+
+fn proxy_manga_pages(
+    state: &AppState,
+    mut response: MangaPagesResponse,
+) -> Result<MangaPagesResponse, ApiFailure> {
+    for page in &mut response.pages {
+        if page.headers.is_empty() {
+            continue;
+        }
+        page.url = signed_manga_image_proxy_url(&state.config, page)?;
+    }
+    Ok(response)
+}
+
+fn signed_manga_image_proxy_url(
+    config: &AppConfig,
+    page: &MangaPageImage,
+) -> Result<String, ApiFailure> {
+    let payload = MangaPageImageProxyPayload {
+        url: page.url.clone(),
+        headers: page.headers.clone(),
+    };
+    let payload_json = serde_json::to_vec(&payload)
+        .map_err(|_| ApiFailure::internal("failed to encode manga image proxy payload"))?;
+    let payload = URL_SAFE_NO_PAD.encode(payload_json);
+    let sig = hash_token(&config.session_secret, &payload);
+    Ok(format!(
+        "{}/manga/page-image?payload={payload}&sig={sig}",
+        config.public_base_url.trim_end_matches('/')
+    ))
+}
+
+fn is_safe_proxy_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "accept" | "accept-language" | "referer" | "referrer" | "user-agent"
+    )
+}
+
 async fn select_enabled_addon(
     state: &AppState,
     addon_id: Option<Uuid>,
@@ -1540,6 +1663,13 @@ impl ApiFailure {
         }
     }
 
+    fn internal(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: message.into(),
+        }
+    }
+
     fn not_configured(provider: AuthProvider) -> Self {
         Self {
             status: StatusCode::SERVICE_UNAVAILABLE,
@@ -1580,6 +1710,15 @@ impl From<typenx_core::addons::AddonClientError> for ApiFailure {
 
 impl From<typenx_core::providers::ProviderError> for ApiFailure {
     fn from(error: typenx_core::providers::ProviderError) -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            message: error.to_string(),
+        }
+    }
+}
+
+impl From<reqwest::Error> for ApiFailure {
+    fn from(error: reqwest::Error) -> Self {
         Self {
             status: StatusCode::BAD_GATEWAY,
             message: error.to_string(),
