@@ -39,7 +39,9 @@ pub struct AppConfig {
     pub web_redirect_url: String,
     pub session_secret: String,
     pub secure_cookies: bool,
+    pub guest_auth_enabled: bool,
     pub built_in_addons: Vec<String>,
+    pub default_addons: Vec<String>,
 }
 
 impl AppConfig {
@@ -54,15 +56,14 @@ impl AppConfig {
             session_secret: env::var("TYPENX_SESSION_SECRET").expect(
                 "TYPENX_SESSION_SECRET is required; set a long random secret in the environment",
             ),
+            guest_auth_enabled: env::var("TYPENX_ENABLE_GUEST_AUTH")
+                .map(|value| !matches!(value.as_str(), "0" | "false" | "FALSE" | "False"))
+                .unwrap_or(true),
             built_in_addons: env::var("TYPENX_BUILTIN_ADDONS")
-                .map(|value| {
-                    value
-                        .split(',')
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty())
-                        .map(str::to_owned)
-                        .collect()
-                })
+                .map(|value| parse_addon_url_list(&value))
+                .unwrap_or_default(),
+            default_addons: env::var("TYPENX_DEFAULT_ADDONS")
+                .map(|value| parse_addon_url_list(&value))
                 .unwrap_or_default(),
         }
     }
@@ -77,6 +78,15 @@ impl AppConfig {
             self.public_base_url.trim_end_matches('/')
         )
     }
+}
+
+fn parse_addon_url_list(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 #[derive(Clone)]
@@ -127,6 +137,30 @@ impl AppState {
         }
     }
 
+    pub async fn seed_default_addons(&self) -> Result<(), ApiFailure> {
+        if self.config.default_addons.is_empty() || !self.store.list_addons().await?.is_empty() {
+            return Ok(());
+        }
+
+        for base_url in &self.config.default_addons {
+            let now = Utc::now();
+            let manifest = self.addon_client.manifest(base_url).await.ok();
+            self.store
+                .register_addon(AddonRegistration {
+                    id: default_addon_id(base_url),
+                    base_url: base_url.to_owned(),
+                    enabled: true,
+                    source: AddonSource::User,
+                    deletable: true,
+                    manifest,
+                    created_at: now,
+                    updated_at: now,
+                })
+                .await?;
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     pub fn with_provider(mut self, provider: Arc<dyn AnimeProviderClient>) -> Self {
         self.providers.insert(provider.provider(), provider);
@@ -146,7 +180,9 @@ pub fn build_router(state: AppState) -> Router {
         .route("/auth/mal/login", get(auth_mal_login))
         .route("/auth/mal/link", get(auth_mal_link))
         .route("/auth/mal/callback", get(auth_mal_callback))
+        .route("/auth/guest", post(auth_guest))
         .route("/auth/logout", post(auth_logout))
+        .route("/providers/any", get(any_provider_set))
         .route("/me", get(me))
         .route("/profile", get(profile))
         .route("/me/providers", get(me_providers))
@@ -205,7 +241,9 @@ fn origin_from_url(url: &str) -> Option<String> {
         auth_mal_login,
         auth_mal_link,
         auth_mal_callback,
+        auth_guest,
         auth_logout,
+        any_provider_set,
         me,
         profile,
         me_providers,
@@ -363,6 +401,60 @@ async fn auth_mal_callback(
     oauth_callback(state, AuthProvider::MyAnimeList, query, &headers).await
 }
 
+#[utoipa::path(
+    post,
+    path = "/auth/guest",
+    responses((status = 200, body = CurrentUser), (status = 403, body = ApiError))
+)]
+async fn auth_guest(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, ApiFailure> {
+    if !state.config.guest_auth_enabled {
+        return Err(ApiFailure {
+            status: StatusCode::FORBIDDEN,
+            message: "guest auth is disabled".to_owned(),
+        });
+    }
+
+    let (user, providers) = if let Some(session) = session_from_headers(&state, &headers).await? {
+        let user = state
+            .store
+            .get_user(session.user_id)
+            .await?
+            .ok_or_else(|| ApiFailure::unauthorized("session user missing"))?;
+        let providers = state.store.list_linked_providers(user.id).await?;
+        (user, providers)
+    } else {
+        let now = Utc::now();
+        let user = state
+            .store
+            .upsert_user(User {
+                id: Uuid::new_v4(),
+                display_name: "Guest".to_owned(),
+                avatar_url: None,
+                created_at: now,
+                updated_at: now,
+            })
+            .await?;
+        (user, vec![])
+    };
+
+    let user_id = user.id;
+    let (_, session_token) = create_session(&state, user_id).await?;
+    let mut response = Json(CurrentUser { user, providers }).into_response();
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&session_cookie(&state.config, &session_token))
+            .expect("valid cookie"),
+    );
+    response.headers_mut().append(
+        "x-typenx-user-id",
+        HeaderValue::from_str(&user_id.to_string()).expect("uuid header"),
+    );
+    Ok(response)
+}
+
 #[utoipa::path(post, path = "/auth/logout", responses((status = 204), (status = 401, body = ApiError)))]
 async fn auth_logout(
     State(state): State<AppState>,
@@ -377,6 +469,18 @@ async fn auth_logout(
         HeaderValue::from_str(&expired_session_cookie(&state.config)).expect("valid cookie"),
     );
     Ok(response)
+}
+
+#[utoipa::path(get, path = "/providers/any", responses((status = 200, body = bool)))]
+async fn any_provider_set(State(state): State<AppState>) -> Result<Json<bool>, ApiFailure> {
+    if state.providers.contains_key(&AuthProvider::AniList)
+        || state.providers.contains_key(&AuthProvider::MyAnimeList)
+    {
+        return Ok(Json(true));
+    }
+
+    let addons = list_all_addons(&state).await?;
+    Ok(Json(addons.iter().any(is_supported_metadata_addon)))
 }
 
 #[utoipa::path(get, path = "/me", responses((status = 200, body = CurrentUser), (status = 401, body = ApiError)))]
@@ -714,18 +818,7 @@ async fn oauth_callback(
         }
     }
 
-    let session_token = random_url_token(48);
-    let session = state
-        .store
-        .create_session(Session {
-            id: Uuid::new_v4(),
-            user_id: user.id,
-            token_hash: hash_token(&state.config.session_secret, &session_token),
-            created_at: now,
-            expires_at: now + Duration::days(30),
-            revoked_at: None,
-        })
-        .await?;
+    let (session, session_token) = create_session(&state, user.id).await?;
 
     let login_result = LoginResult {
         user,
@@ -758,6 +851,23 @@ fn web_redirect_url(config: &AppConfig, redirect_after: Option<&str>) -> String 
         Some(path) => format!("{base}/{path}"),
         None => base.to_owned(),
     }
+}
+
+async fn create_session(state: &AppState, user_id: Uuid) -> Result<(Session, String), ApiFailure> {
+    let now = Utc::now();
+    let session_token = random_url_token(48);
+    let session = state
+        .store
+        .create_session(Session {
+            id: Uuid::new_v4(),
+            user_id,
+            token_hash: hash_token(&state.config.session_secret, &session_token),
+            created_at: now,
+            expires_at: now + Duration::days(30),
+            revoked_at: None,
+        })
+        .await?;
+    Ok((session, session_token))
 }
 
 async fn current_user(
@@ -853,6 +963,16 @@ fn parse_addon_id(addon_id: Option<&str>) -> Result<Option<Uuid>, ApiFailure> {
         .transpose()
 }
 
+fn is_supported_metadata_addon(addon: &AddonRegistration) -> bool {
+    addon.enabled
+        && addon.manifest.as_ref().is_some_and(|manifest| {
+            matches!(
+                manifest.id.as_str(),
+                "typenx-addon-anilist" | "typenx-addon-myanimelist" | "typenx-addon-kitsu"
+            )
+        })
+}
+
 async fn list_all_addons(state: &AppState) -> Result<Vec<AddonRegistration>, ApiFailure> {
     let mut addons = state.store.list_addons().await?;
     for base_url in &state.config.built_in_addons {
@@ -874,6 +994,13 @@ async fn list_all_addons(state: &AppState) -> Result<Vec<AddonRegistration>, Api
 
 fn built_in_addon_id(base_url: &str) -> Uuid {
     let digest = hash_token("typenx-built-in-addon", base_url);
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest.as_bytes()[..16]);
+    Uuid::from_bytes(bytes)
+}
+
+fn default_addon_id(base_url: &str) -> Uuid {
+    let digest = hash_token("typenx-default-addon", base_url);
     let mut bytes = [0_u8; 16];
     bytes.copy_from_slice(&digest.as_bytes()[..16]);
     Uuid::from_bytes(bytes)
@@ -1122,6 +1249,119 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn guest_auth_creates_local_user_session_without_provider() {
+        let router = build_router(test_state());
+
+        let guest_response = router
+            .clone()
+            .oneshot(Request::post("/auth/guest").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(guest_response.status(), StatusCode::OK);
+        let cookie = guest_response
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+
+        let guest_body = axum::body::to_bytes(guest_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let guest: CurrentUser = serde_json::from_slice(&guest_body).unwrap();
+        assert_eq!(guest.user.display_name, "Guest");
+        assert!(guest.providers.is_empty());
+
+        let me_response = router
+            .oneshot(
+                Request::get("/me")
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(me_response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn any_provider_set_returns_false_without_supported_provider_or_addon() {
+        let router = build_router(test_state());
+
+        let response = router
+            .oneshot(Request::get("/providers/any").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let has_provider: bool = serde_json::from_slice(&body).unwrap();
+        assert!(!has_provider);
+    }
+
+    #[tokio::test]
+    async fn any_provider_set_returns_true_for_supported_addon() {
+        let store = Arc::new(MemoryStore::default());
+        store
+            .register_addon(AddonRegistration {
+                id: Uuid::new_v4(),
+                base_url: "http://127.0.0.1:8789".to_owned(),
+                enabled: true,
+                source: AddonSource::User,
+                deletable: true,
+                manifest: Some(test_addon_manifest("typenx-addon-kitsu")),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+            })
+            .await
+            .unwrap();
+        let router = build_router(test_state_with_store(store));
+
+        let response = router
+            .oneshot(Request::get("/providers/any").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let has_provider: bool = serde_json::from_slice(&body).unwrap();
+        assert!(has_provider);
+    }
+
+    #[tokio::test]
+    async fn default_addons_seed_as_deletable_user_addons_on_empty_store() {
+        let store = Arc::new(MemoryStore::default());
+        let state = AppState::from_config(
+            store.clone(),
+            AppConfig {
+                public_base_url: "http://127.0.0.1:8080".to_owned(),
+                web_redirect_url: "http://127.0.0.1:3000".to_owned(),
+                session_secret: "test-secret".to_owned(),
+                secure_cookies: false,
+                guest_auth_enabled: true,
+                built_in_addons: vec![],
+                default_addons: vec!["http://127.0.0.1:65535".to_owned()],
+            },
+        );
+
+        state.seed_default_addons().await.unwrap();
+
+        let addons = store.list_addons().await.unwrap();
+        assert_eq!(addons.len(), 1);
+        assert_eq!(addons[0].source, AddonSource::User);
+        assert!(addons[0].deletable);
+        assert_eq!(addons[0].base_url, "http://127.0.0.1:65535");
+    }
+
+    #[tokio::test]
     async fn settings_link_flow_adds_second_provider_to_current_user() {
         let state = test_state()
             .with_provider(Arc::new(TestAnimeProvider {
@@ -1235,16 +1475,34 @@ mod tests {
     }
 
     fn test_state() -> AppState {
+        test_state_with_store(Arc::new(MemoryStore::default()))
+    }
+
+    fn test_state_with_store(store: Arc<MemoryStore>) -> AppState {
         AppState::from_config(
-            Arc::new(MemoryStore::default()),
+            store,
             AppConfig {
                 public_base_url: "http://127.0.0.1:8080".to_owned(),
                 web_redirect_url: "http://127.0.0.1:3000".to_owned(),
                 session_secret: "test-secret".to_owned(),
                 secure_cookies: false,
+                guest_auth_enabled: true,
                 built_in_addons: vec![],
+                default_addons: vec![],
             },
         )
+    }
+
+    fn test_addon_manifest(id: &str) -> AddonManifest {
+        AddonManifest {
+            id: id.to_owned(),
+            name: "Test Addon".to_owned(),
+            version: "0.1.0".to_owned(),
+            description: None,
+            icon: None,
+            resources: vec![],
+            catalogs: vec![],
+        }
     }
 
     struct TestAnimeProvider {
